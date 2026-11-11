@@ -1,0 +1,1 @@
+set -- "$@" --platform linux/arm64 --build-arg INSTALL_SHERPA_KWS=1

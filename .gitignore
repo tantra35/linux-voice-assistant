@@ -28,3 +28,6 @@ version_githash.txt
 # Large build artifacts (place manually, see wheels/README.md)
 wheels/*
 !wheels/README.md
+# Local build/deploy artifacts
+.vagrant/
+/tantra35-lva-*.tar.gz
