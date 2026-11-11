@@ -144,8 +144,9 @@ These are all the events LVA emits. Your peripheral script receives them and rea
 | Event | Data | Description |
 |-------|------|-------------|
 | `media_player_playing` | — | HA started streaming music or media to the background music player (non-announcement). Show a "media playing" indicator. Not emitted for TTS or announcements — those use `tts_speaking`. |
-| `volume_changed` | `{"volume": float}` | The speaker volume changed (0.0–1.0). Update any volume display or indicator ring. |
+| `volume_changed` | `{"volume": float}` | The music volume changed (0.0–1.0). Update any volume display or indicator ring. |
 | `volume_muted` | `{"muted": bool}` | The media player mute state changed. Distinct from microphone mute (`muted` event). |
+| `duck_changed` | `{"ducked": bool}` | The music player was ducked (assistant talking) or restored. A peripheral that plays its own audio should lower (and later restore) its playback volume — the mpv duck factor alone has little effect when the player runs on another host. Replayed in the snapshot so reconnecting clients learn the current duck state. |
 
 ### HA driven entity events
 

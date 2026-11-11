@@ -24,12 +24,12 @@ For the list of Home Assistant entities see [configuration.md](configuration.md)
 
 ## Basics: two audio channels
 
-LVA has two independent audio players that share one volume setting:
+LVA has two independent audio players with separate volume handling:
 
-| Player | Used for |
-|--------|----------|
-| **Music player** | Media sent from Home Assistant (music, radio, `media_player.play_media` without `announce`) |
-| **Assistant player** | Wake / mute / unmute chimes, the thinking sound, spoken replies (TTS), announcements, timer ringing, button sounds |
+| Player | Used for | Volume |
+|--------|----------|--------|
+| **Music player** | Media sent from Home Assistant (music, radio, `media_player.play_media` without `announce`) | Follows the shared volume setting (media player entity, peripheral buttons) |
+| **Assistant player** | Wake / mute / unmute chimes, the thinking sound, spoken replies (TTS), announcements, timer ringing, button sounds | Fixed full volume, **not** affected by volume or mute commands |
 
 The music player can be sent to a different sound card with `--music-output-device`. By default both use `--audio-output-device`. `--audio-output-device` defaults to `pulse`, the default PulseAudio output (PulseAudio itself, or PipeWire through `pipewire-pulse`). A device name carries its mpv driver as a prefix (for example `pulse/...`) and that driver is used.
 
@@ -75,7 +75,7 @@ Music started from Home Assistant (a media player service call or the media play
 | Pause / Resume | The music pauses or resumes. |
 | Stop | The music stops and the state becomes `idle`. |
 | Track ends | The state becomes `idle` and Home Assistant is informed. |
-| Volume change | Applies to music **and** assistant sounds, see [Volume](#volume). |
+| Volume change | Applies to **music only**, assistant sounds keep their fixed volume, see [Volume](#volume). |
 | Wake word / conversation | Music is ducked to 50 % and restored afterwards, see [Talking to the assistant](#talking-to-the-assistant). |
 | Timer rings | Music is ducked while the timer rings and restored when it stops, see [Timers](#timers). |
 | Mute switch | Does **not** affect music, see [Mute](#mute). |
@@ -177,10 +177,10 @@ Do not confuse this with the **media player mute**, which sets the shared volume
 
 ## Volume
 
-- There is **one shared volume** for music and for all assistant sounds (chimes, replies, timer). Changing it on the media player entity or with a peripheral's volume buttons changes both.
+- There is **one shared volume for music only** (the music player and any peripheral speaker-volume display). Assistant sounds (chimes, replies, timer) always play at their fixed full volume and are **not** affected by the media player volume, volume buttons, or media player mute — so adjusting the loudness of your music never changes the assistant's voice.
 - The volume is saved in `preferences.json` and restored after a restart.
-- **Media player mute** (the speaker icon on the media player card) sets the volume to 0 and remembers the previous value. Unmuting restores it.
-- **Ducking** is temporary and independent of the set volume: it always means 50 % of the current volume.
+- **Media player mute** (the speaker icon on the media player card) sets the music volume to 0 and remembers the previous value. Unmuting restores it. The assistant's voice keeps playing.
+- **Ducking** is temporary and independent of the set volume: it always means 50 % of the current music volume. Peripherals are told about it with the `duck_changed` event (see [peripheral_api.md](peripheral_api.md)) so they can lower their own playback volume as well.
 - A separate **Mic Volume** controls the microphone level. It does not affect playback, see [configuration.md](configuration.md).
 
 ---
@@ -202,7 +202,7 @@ If a peripheral (such as a HAT with buttons) is connected through the [periphera
 | Start listening | Plays the start-listening sound and begins an interaction without a wake word. Also silences a ringing timer. Ignored while muted. |
 | Stop pipeline | Stops the current reply or a ringing timer, same as the stop word. |
 | Mute / unmute microphone | Same as the Mute switch. |
-| Volume up / down / set | Changes the shared volume by `--peripheral-volume-step`. |
+| Volume up / down / set | Changes the music volume by `--peripheral-volume-step`. Assistant sounds keep their fixed volume. |
 | Stop / pause / resume media | Controls the music player directly. |
 | Single press | Reported to Home Assistant as a `single_press` event (no sound). |
 | Double / triple / long press | Plays the matching sound (`--button-double-press-sound`, `--button-triple-press-sound`, `--button-long-press-sound`) and reports the event to Home Assistant so you can use it in automations. |

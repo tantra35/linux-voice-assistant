@@ -35,7 +35,7 @@ LVA always means **Linux Voice Assistant**, this project.
 - `linux_voice_assistant/player/libmpv.py` - libmpv wrapper: playback, thread-safe state, volume/ducking, end-of-file callbacks
 - `linux_voice_assistant/entity.py` - Entity definitions (MediaPlayer, MuteSwitch, etc.)
 - `linux_voice_assistant/api_server.py` - ESPHome API server 
-- `linux_voice_assistant/peripheral_api.py` - Peripheral WebSocket API server
+- `linux_voice_assistant/peripheral_api.py` - Peripheral WebSocket API server and client (`--peripheral-connect`)
 - `linux_voice_assistant/models.py` - Preferences and ServerState dataclasses
 
 ## Development Commands
@@ -139,6 +139,12 @@ Before claiming completion:
 - `linux_voice_assistant/mpv_player.py` and `linux_voice_assistant/player/libmpv.py` - Audio output requires `libmpv-dev`
 - `linux_voice_assistant/webrtc.py` - Noise suppression/gain algorithms
 - `linux_voice_assistant/satellite.py` - ESPHome API protocol handling
+
+## Audio Volume and Ducking Ownership (decided with the developer - do not regress)
+
+- Only the **music player** follows volume and media-player mute commands (`entity.py` `_apply_volume`/MUTE/UNMUTE, `peripheral_api.py` `volume_up/down`/`set_volume`, startup preset in `__main__.py`). The **assistant (TTS/announce) player** stays at its fixed full volume - never write volume or mute to `tts_player`/`announce_player` from these paths. Microphone mute (`MuteSwitchEntity`, `mute_mic`/`unmute_mic`) is unrelated and untouched by all of this.
+- mpv ducking is multiplicative (`user_volume x duck_factor` in `player/libmpv.py`) and applies to `music_player` only, so it never conflicts with `set_volume`.
+- `duck()`/`unduck()` in `satellite.py` emit the `duck_changed` peripheral event (tracked as a state event, replayed in the snapshot) so a peripheral running its own player on another host can lower/restore its own volume. The marusia-d daemon handler is not implemented yet.
 
 ## Sherpa-onnx KWS Integration (added 2026-10-05)
 
