@@ -429,14 +429,15 @@ class TestDispatchVolume:
         assert state.volume == pytest.approx(0.0)
 
     @pytest.mark.asyncio
-    async def test_volume_up_updates_music_and_tts_players(self, tmp_path):
+    async def test_volume_up_updates_music_player_only(self, tmp_path):
         state = make_state(tmp_path, volume=0.5)
         server = make_server(state)
 
         await dispatch(server, LVACommand.VOLUME_UP.value)
 
         state.music_player.set_volume.assert_called_once()
-        state.tts_player.set_volume.assert_called_once()
+        # TTS volume is decoupled from the player volume
+        state.tts_player.set_volume.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_volume_up_pushes_media_player_state(self, tmp_path):
@@ -835,6 +836,15 @@ class TestEmitEvent:
         server = make_server()
         await server.emit_event(LVAEvent.TTS_SPEAKING)
         assert server._current_state == LVAEvent.TTS_SPEAKING  # pylint: disable=protected-access
+
+    @pytest.mark.asyncio
+    async def test_tracks_duck_changed_as_state_event(self):
+        # Reconnecting peripherals must learn the current duck state via
+        # the snapshot replay.
+        server = make_server()
+        await server.emit_event(LVAEvent.DUCKED, {"ducked": True})
+        assert server._current_state == LVAEvent.DUCKED  # pylint: disable=protected-access
+        assert server._current_state_data == {"ducked": True}  # pylint: disable=protected-access
 
     @pytest.mark.asyncio
     async def test_does_not_track_transient_events(self):

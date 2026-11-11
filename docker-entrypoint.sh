@@ -160,6 +160,10 @@ if [ -n "${PERIPHERAL_VOLUME_STEP}" ]; then
   EXTRA_ARGS+=( "--peripheral-volume-step" "$PERIPHERAL_VOLUME_STEP" )
 fi
 
+if [ -n "${PERIPHERAL_CONNECT}" ]; then
+  EXTRA_ARGS+=( "--peripheral-connect" "$PERIPHERAL_CONNECT" )
+fi
+
 if [ -n "${PERIPHERAL_STARTUP_WAIT}" ]; then
   EXTRA_ARGS+=( "--peripheral-startup-wait" "$PERIPHERAL_STARTUP_WAIT" )
 fi

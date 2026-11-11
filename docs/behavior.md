@@ -195,7 +195,7 @@ If the second attempt also fails, the assistant logs the error and exits with a 
 
 ## Buttons (peripherals)
 
-If a peripheral (such as a HAT with buttons) is connected through the [peripheral API](peripheral_api.md), it can trigger the following. What a physical button does is defined by the peripheral, not by LVA.
+If a peripheral (such as a HAT with buttons) is connected through the [peripheral API](peripheral_api.md) — either LVA listens and the peripheral connects in, or LVA connects out to an endpoint on the speaker with `--peripheral-connect` — it can trigger the following. What a physical button does is defined by the peripheral, not by LVA.
 
 | Action | Result |
 |--------|--------|

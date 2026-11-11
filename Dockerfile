@@ -37,6 +37,10 @@ RUN --mount=type=bind,source=wheels,target=/tmp/wheels \
     if [ "$TARGETARCH" = "arm64" ] && \
     ls /tmp/wheels/sherpa_onnx-*-cp313-*_aarch64.whl >/dev/null 2>&1; then \
     .venv/bin/pip install --no-cache-dir --no-index --find-links /tmp/wheels sherpa-onnx && \
+    # The NPU wheel declares no dependencies; click is required by its
+    # sherpa-onnx-cli console script, sentencepiece + pypinyin by
+    # text2token (see pyproject.toml sherpa-kws extra)
+    .venv/bin/pip install --no-cache-dir click sentencepiece pypinyin && \
     SDK_TGZ=$(ls /tmp/wheels/RKNPU2_SDK-*.tgz 2>/dev/null | head -n1) && \
     { [ -n "$SDK_TGZ" ] || { echo "ERROR: RKNPU2_SDK-*.tgz not found in wheels/ (required for the NPU sherpa-onnx wheel)"; exit 1; }; } && \
     mkdir /tmp/rknn && \
@@ -56,6 +60,10 @@ FROM python:3.13-slim-trixie
 ENV LANG=C.UTF-8
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
+### venv scripts (linux-voice-assistant, sherpa-onnx-cli, sherpa-onnx-*
+### native binaries) appended AFTER the system PATH so nothing in the image
+### is shadowed
+ENV PATH="${PATH}:/app/.venv/bin"
 
 LABEL \
     org.opencontainers.image.authors="Open Home Foundation" \
@@ -68,34 +76,25 @@ LABEL \
     org.opencontainers.image.vendor="Open Home Foundation"
 
 ### Install packages:
-# - avahi-utils:        For zeroconf/mDNS discovery by Home Assistant
-# - pulseaudio-utils:   Required by soundcard library for audio I/O
-# - alsa-utils:         ALSA tools for audio device management
-# - pipewire-bin:       Required for pipewire support
-# - pipewire-alsa:      Required for pipewire support
-# - pipewire-pulse:     Required for pipewire support
+# - pulseaudio-utils:   pactl in docker-entrypoint.sh + libpulse for mpv/soundcard
 # - libmpv2:            Runtime library for python-mpv (no -dev package, no build tools)
-# - libasound2-plugins: Required by python-mpv for audio playback
 # - ca-certificates:    For encrypted connections
-# - iproute2:           For ss command in entrypoint (port check)
-# - vim:                Editor for debugging inside the container
-# - procps:             For pgrep in healthcheck
+# - procps:             For pgrep in healthcheck (docker-compose.yml)
+#
+# The container is an audio CLIENT only: it connects to the host's
+# PulseAudio/PipeWire server through the mounted runtime-dir socket
+# (PULSE_SERVER / docs/debugging.md). No audio server runs inside, so the
+# pipewire daemon packages are not installed. mpv's native pipewire audio
+# driver still works: libmpv2 hard-depends on the libpipewire client
+# libraries, which apt pulls in automatically.
 #
 # libmpv2 depends on libegl1/libgbm1, which pull in Mesa and LLVM (~170 MB).
 # LVA only plays audio, so these are purged without their dependents.
 RUN apt-get update && \
     apt-get install --yes --no-install-recommends \
-    avahi-utils \
     pulseaudio-utils \
-    alsa-utils \
-    pipewire-bin \
-    pipewire-alsa \
-    pipewire-pulse \
     libmpv2 \
-    libasound2-plugins \
     ca-certificates \
-    iproute2 \
-    vim \
     procps && \
     dpkg --purge --force-depends libllvm19 mesa-libgallium libgl1-mesa-dri libz3-4 && \
     apt-get clean && \
@@ -111,13 +110,17 @@ WORKDIR /app
 
 ### Copy virtual environment and application files:
 COPY --from=build /app/.venv ./.venv
-COPY script/ ./script/
+COPY script/run ./script/run
 COPY pyproject.toml ./
 COPY setup.cfg ./
 COPY sounds/ ./sounds/
 COPY wakewords/ ./wakewords/
 COPY linux_voice_assistant/ ./linux_voice_assistant/
 COPY docker-entrypoint.sh ./
+### mpv's ao=pipewire driver needs a client config; the libpipewire client
+### libraries ship without one (the pipewire daemon package that provides
+### client.conf is not installed - see the audio CLIENT note above).
+COPY pipewire-client.conf /usr/share/pipewire/client.conf
 COPY version.txt ./
 COPY version_githash.txt ./
 

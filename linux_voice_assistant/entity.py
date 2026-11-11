@@ -189,7 +189,6 @@ class MediaPlayerEntity(ESPHomeEntity):
                         self.previous_volume = self.volume
                         self.volume = 0
                         self.music_player.set_volume(0)
-                        self.announce_player.set_volume(0)
                         self.muted = True
                         if hasattr(self.server, "state") and getattr(self.server, "state", None) is not None:
                             self.server.state.persist_volume(self.volume)
@@ -200,7 +199,6 @@ class MediaPlayerEntity(ESPHomeEntity):
                     if self.muted:
                         self.volume = self.previous_volume
                         self.music_player.set_volume(int(self.volume * 100))
-                        self.announce_player.set_volume(int(self.volume * 100))
                         self.muted = False
                         if hasattr(self.server, "state") and getattr(self.server, "state", None) is not None:
                             self.server.state.persist_volume(self.volume)
@@ -271,8 +269,10 @@ class MediaPlayerEntity(ESPHomeEntity):
         normalized = max(0.0, min(1.0, float(volume)))
         volume_percent = int(round(normalized * 100))
 
+        # Only the music player follows the volume; the announce (TTS)
+        # player stays at its own fixed volume so adjusting the media
+        # player volume never changes the assistant's voice.
         self.music_player.set_volume(volume_percent)
-        self.announce_player.set_volume(volume_percent)
 
         self.volume = normalized
 

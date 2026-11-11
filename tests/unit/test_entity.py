@@ -152,11 +152,12 @@ class TestMediaPlayerEntitySubscribeStates:
 
 
 class TestMediaPlayerEntityVolume:
-    def test_apply_volume_sets_both_players(self):
+    def test_apply_volume_sets_music_player_only(self):
         entity = make_media_player(initial_volume=1.0)
         entity._apply_volume(0.5, persist=False)
         entity.music_player.set_volume.assert_called_with(50)
-        entity.announce_player.set_volume.assert_called_with(50)
+        # TTS/announce volume is decoupled from the player volume
+        entity.announce_player.set_volume.assert_not_called()
 
     def test_apply_volume_clamps_above_one(self):
         entity = make_media_player()

@@ -356,6 +356,16 @@ class TestContinueConversation:
 
 
 class TestDuckUnduck:
+    def _sat(self, tmp_path):
+        sat = make_satellite(tmp_path)
+        sat.state.peripheral_api = MagicMock()
+        return sat
+
+    def _emitted(self, sat):
+        from linux_voice_assistant.peripheral_api import LVAEvent
+
+        return [(event, data) for event, data in (c.args for c in sat.state.peripheral_api.emit_event_sync.call_args_list) if event == LVAEvent.DUCKED]
+
     def test_duck_calls_music_player_duck(self, tmp_path):
         sat = make_satellite(tmp_path)
         sat.duck()
@@ -365,6 +375,29 @@ class TestDuckUnduck:
         sat = make_satellite(tmp_path)
         sat.unduck()
         sat.state.music_player.unduck.assert_called_once()
+
+    def test_duck_emits_duck_changed_once(self, tmp_path):
+        from linux_voice_assistant.peripheral_api import LVAEvent
+
+        sat = self._sat(tmp_path)
+        # duck() fires on every pipeline run; the event must go out only
+        # on the transition into the ducked state.
+        sat.duck()
+        sat.duck()
+        assert self._emitted(sat) == [(LVAEvent.DUCKED, {"ducked": True})]
+
+    def test_unduck_emits_duck_changed_false(self, tmp_path):
+        from linux_voice_assistant.peripheral_api import LVAEvent
+
+        sat = self._sat(tmp_path)
+        sat.duck()
+        sat.unduck()
+        assert self._emitted(sat) == [(LVAEvent.DUCKED, {"ducked": True}), (LVAEvent.DUCKED, {"ducked": False})]
+
+    def test_unduck_without_duck_emits_nothing(self, tmp_path):
+        sat = self._sat(tmp_path)
+        sat.unduck()
+        assert self._emitted(sat) == []
 
 
 # ---------------------------------------------------------------------------

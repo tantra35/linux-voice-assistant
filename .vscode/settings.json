@@ -9,5 +9,12 @@
   "python.formatting.provider": "none",
   "python.terminal.activateEnvironment": true,
   "python.terminal.executeInShell": true,
-  "python.pythonPath": "./.venv/bin/python"
+  "python.pythonPath": "./.venv/bin/python",
+  "python-envs.pythonProjects": [
+    {
+      "path": ".",
+      "envManager": "ms-python.python:conda",
+      "packageManager": "ms-python.python:conda"
+    }
+  ]
 }

@@ -72,6 +72,9 @@ _LOGGER = logging.getLogger(__name__)
 # (homeassistant/components/assist_pipeline, DuplicateWakeUpDetectedError).
 _DUPLICATE_WAKE_UP_CODE = "duplicate_wake_up_detected"
 
+# Delay before the thinking sound starts looping, so short intents stay silent.
+_THINKING_SOUND_DELAY_SECONDS = 1.5
+
 PROTO_TO_MESSAGE_TYPE = {v: k for k, v in MESSAGE_TYPE_TO_PROTO.items()}
 
 _HAS_AUDIO_DATA2 = "data2" in {f.name for f in VoiceAssistantAudio.DESCRIPTOR.fields}
@@ -362,7 +365,12 @@ class VoiceSatelliteProtocol(APIServer):
         self._timer_finished = False
         self._timer_ring_start: Optional[float] = None
         self._processing = False
+        # Pending start timer for the looping thinking sound (threading.Timer).
+        self._thinking_sound_timer: Optional[threading.Timer] = None
         self._pipeline_active = False
+        # Current duck state, tracked so duck_changed events are only
+        # emitted on transitions (duck() fires on every pipeline run).
+        self._ducked = False
         self._external_wake_words: Dict[str, VoiceAssistantExternalWakeWord] = {}
         self._disconnect_event = asyncio.Event()
 
@@ -562,6 +570,7 @@ class VoiceSatelliteProtocol(APIServer):
             # voice_assistant.stop behavior
             _LOGGER.debug("Muting voice assistant (voice_assistant.stop)")
             self._is_streaming_audio = False
+            self._cancel_thinking_sound()
             self.state.tts_player.stop()
             # Stop any ongoing voice processing
             self.state.stop_word.is_active = False  # type: ignore[attr-defined]
@@ -591,15 +600,17 @@ class VoiceSatelliteProtocol(APIServer):
         elif event_type == VoiceAssistantEventType.VOICE_ASSISTANT_INTENT_START:
             self._intent_started = True
             self._emit(LVAEvent.THINKING)
-            # Play optional audible thinking sound
+            # Play optional audible thinking sound (loops while processing)
             if self.state.thinking_sound_enabled:
                 processing = getattr(self.state, "processing_sound", None)
                 if processing:
-                    _LOGGER.debug("Playing processing sound: %s", processing)
                     self.state.stop_word.is_active = True  # type: ignore[attr-defined]
                     self._processing = True
                     self.duck()
-                    self.state.tts_player.play(self.state.processing_sound)
+                    # Delayed start so short intents finish before the loop begins.
+                    self._thinking_sound_timer = threading.Timer(_THINKING_SOUND_DELAY_SECONDS, self._play_thinking_sound)
+                    self._thinking_sound_timer.start()
+                    _LOGGER.debug("Thinking sound scheduled in %.1fs: %s", _THINKING_SOUND_DELAY_SECONDS, processing)
 
         elif event_type in (
             VoiceAssistantEventType.VOICE_ASSISTANT_STT_VAD_END,
@@ -650,6 +661,7 @@ class VoiceSatelliteProtocol(APIServer):
             self._stt_text_received = False
 
         elif event_type == VoiceAssistantEventType.VOICE_ASSISTANT_ERROR:
+            self._cancel_thinking_sound()
             self._emit(LVAEvent.PIPELINE_ERROR)
             if data.get("code") == _DUPLICATE_WAKE_UP_CODE:
                 self._run_taken_by_other = True
@@ -995,6 +1007,7 @@ class VoiceSatelliteProtocol(APIServer):
         self._emit(LVAEvent.LISTENING)
 
     def stop(self) -> None:
+        self._cancel_thinking_sound()
         self.state.active_wake_words.discard(self.state.stop_word.id)
         self._pipeline_active = False
 
@@ -1020,6 +1033,7 @@ class VoiceSatelliteProtocol(APIServer):
             return
 
         self._tts_played = True
+        self._cancel_thinking_sound()
         _LOGGER.debug("Playing TTS response: %s", self._tts_url)
 
         self.state.active_wake_words.add(self.state.stop_word.id)
@@ -1031,6 +1045,7 @@ class VoiceSatelliteProtocol(APIServer):
         Clean up after playback ended or the pipeline finished, then continue the conversation or go idle.
         :param pipeline_ended: True if the pipeline ended without a spoken reply, which plays the pipeline ended sound.
         """
+        self._cancel_thinking_sound()
         self._pipeline_active = False
         self.state.active_wake_words.discard(self.state.stop_word.id)
         self.send_messages([VoiceAssistantAnnounceFinished()])
@@ -1079,10 +1094,52 @@ class VoiceSatelliteProtocol(APIServer):
     def duck(self) -> None:
         _LOGGER.debug("Ducking music")
         self.state.music_player.duck()
+        if not self._ducked:
+            self._ducked = True
+            # Tell the peripheral to lower its own playback volume too:
+            # the mpv player may run on another host, where the local
+            # duck factor alone has little audible effect.
+            self._emit(LVAEvent.DUCKED, {"ducked": True})
 
     def unduck(self) -> None:
         _LOGGER.debug("Unducking music")
         self.state.music_player.unduck()
+        if self._ducked:
+            self._ducked = False
+            self._emit(LVAEvent.DUCKED, {"ducked": False})
+
+    # ------------------------------------------------------------------
+    # Thinking sound loop
+    # ------------------------------------------------------------------
+
+    def _cancel_thinking_sound(self) -> None:
+        """Stop the looping thinking sound.
+
+        Cancels a pending delayed start and clears the replay flag. Safe to
+        call when nothing is scheduled or playing.
+        """
+        if self._thinking_sound_timer is not None:
+            self._thinking_sound_timer.cancel()
+            self._thinking_sound_timer = None
+        self._processing = False
+
+    def _play_thinking_sound(self) -> None:
+        """Play one iteration of the thinking sound (invoked after the start delay)."""
+        self._thinking_sound_timer = None
+        if not self._processing:
+            return
+        _LOGGER.debug("Playing thinking sound (looping): %s", self.state.processing_sound)
+        self.state.tts_player.play(
+            self.state.processing_sound,
+            done_callback=self._thinking_sound_finished,
+        )
+
+    def _thinking_sound_finished(self) -> None:
+        """Replay the thinking sound while processing; otherwise restore ducking."""
+        if self._processing:
+            self._play_thinking_sound()
+        else:
+            self.unduck()
 
     # ------------------------------------------------------------------
     # Timer finished loop
@@ -1138,6 +1195,7 @@ class VoiceSatelliteProtocol(APIServer):
         self._tts_played = False
         self._continue_conversation = False
         self._timer_finished = False
+        self._cancel_thinking_sound()
         self._pipeline_active = False
 
         # Deregister this connection.

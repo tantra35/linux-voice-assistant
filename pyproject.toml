@@ -38,8 +38,16 @@ dependencies = [
 dynamic = ["version"]
 
 [project.optional-dependencies]
+# click: undeclared runtime dep of sherpa-onnx's own sherpa-onnx-cli console
+# script (its wheel ships no Requires-Dist at all). sentencepiece + pypinyin:
+# lazily imported by sherpa_onnx.utils.text2token (bpe tokens need
+# sentencepiece, pypinyin is imported unconditionally in the same function) -
+# required for `sherpa-onnx-cli text2token` used to generate keywords files
 sherpa-kws = [
     "sherpa-onnx>=1.10,<2",
+    "click",
+    "sentencepiece",
+    "pypinyin",
 ]
 dev = [
     "black",

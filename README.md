@@ -101,7 +101,7 @@ usage: __main__.py [-h] [--name NAME] [--audio-input-device AUDIO_INPUT_DEVICE] 
 | `--wakeup-sound`                | Sound file played when wake word is detected                                           | `sounds/wake_word_triggered.flac`    |
 | `--start-listening-sound`       | Sound file played when button is pressed to start listening                            | `sounds/start_listening_button.flac` |
 | `--timer-finished-sound`        | Sound file played when timer finishes                                                  | `sounds/timer_finished.flac`         |
-| `--processing-sound`            | Sound played while assistant is processing                                             | `sounds/processing.wav`              |
+| `--processing-sound`            | Sound played while assistant is processing                                             | `sounds/thinking.wav`                |
 | `--mute-sound`                  | Sound played when muting the assistant                                                 | `sounds/mute_switch_on.flac`         |
 | `--unmute-sound`                | Sound played when unmuting the assistant                                               | `sounds/mute_switch_off.flac`        |
 | `--button-double-press-sound`   | Sound played on button double press                                                    | `sounds/button_double_press.flac`    |

@@ -10,4 +10,5 @@
 !/wakewords/openWakeWord/*
 !/version.txt
 !/version_githash.txt
+!/pipewire-client.conf
 !/wheels/*

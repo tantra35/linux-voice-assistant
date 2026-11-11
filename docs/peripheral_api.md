@@ -8,7 +8,7 @@ The peripheral API is what allows hardware like the Satellite1 HAT Board or the 
 
 ## How it works
 
-LVA acts as the WebSocket **server**. Your peripheral script or container connects as a **client**. Once connected, LVA immediately sends a snapshot of its current state, and from that point on all communication is bidirectional:
+By default LVA acts as the WebSocket **server**. Your peripheral script or container connects as a **client**. Once connected, LVA immediately sends a snapshot of its current state, and from that point on all communication is bidirectional:
 
 - **Events** flow from LVA to your client, describing what the assistant is doing right now (listening, thinking, speaking, etc.).
 - **Commands** flow from your client to LVA, telling it what to do (start listening, adjust volume, fire a button press event to Home Assistant, etc.).
@@ -32,13 +32,17 @@ Your peripheral script                   LVA
         │──── command: start_listening ───►│   (user pressed action button)
 ```
 
+### Client mode (LVA connects to the speaker)
+
+With `--peripheral-connect ws://<host>:<port>` the connection direction is reversed: LVA dials out to a WebSocket endpoint on the speaker (for example the `marusia-d` controlling daemon) as a **client**, and no server is started. The JSON protocol is identical — LVA still sends the snapshot and the events, and still receives the commands. LVA reconnects automatically with exponential backoff (1 s doubling up to 30 s) until the endpoint is reachable again.
+
 ### Connection
 
 ```
 ws://<lva-host>:6055
 ```
 
-By default LVA binds to `0.0.0.0:6055`. You can change the host and port with `--peripheral-host` and `--peripheral-port`, or disable the API entirely with `--disable-peripheral-api`.
+By default LVA binds to `0.0.0.0:6055`. You can change the host and port with `--peripheral-host` and `--peripheral-port`, reverse the direction with `--peripheral-connect` (LVA connects out to an endpoint on the speaker instead of listening), or disable the API entirely with `--disable-peripheral-api`.
 
 ### Message format
 

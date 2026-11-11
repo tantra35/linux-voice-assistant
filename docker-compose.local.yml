@@ -1,0 +1,123 @@
+---
+# Compose file for running the locally built image (tantra35/lva) with the
+# sherpa-onnx KWS wake word engine and RK3588 NPU support on the nanopi.
+# The image itself is built on the dev machine (Dockerfile.build.sh) and
+# transferred to the nanopi with `docker load`; this file only RUNS it:
+#   docker compose -f docker-compose.local.yml up -d
+#
+# Configuration comes from .env (see .env.example).
+#
+# Defaults assume the target runs a SYSTEMWIDE PipeWire (root), whose
+# pipewire-pulse socket lives at /run/pipewire/pulse/native (no per-user
+# /run/user/1000, no cookie) and the container therefore runs as root too.
+
+services:
+  # Fix permissions for wakeword_data and configuration volume
+  fix-permissions:
+    image: "${LVA_IMAGE:-tantra35/lva}:${LVA_IMAGE_TAG:-0.0.1-p01}"
+    entrypoint: []
+    command: "chown -R ${LVA_USER_ID:-0}:${LVA_USER_GROUP:-0} /app/local /app/configuration /app/wakewords/custom /app/sounds/custom"
+    environment:
+      # Pulseaudio (systemwide pipewire-pulse)
+      - XDG_RUNTIME_DIR=${LVA_XDG_RUNTIME_DIR:-/run}
+      - PULSE_SERVER=${LVA_PULSE_SERVER:-/run/pipewire/pulse/native}
+      - PULSE_COOKIE=${LVA_PULSE_COOKIE:-DISABLED}
+    env_file: ${ENV_FILE:-.env}
+    group_add:
+      - audio
+    volumes:
+      # Same host dirs as the main service (see the volume notes there)
+      - ./data/wakeword-data:/app/local
+      - ./data/wakeword-custom:/app/wakewords/custom
+      - ./data/configuration:/app/configuration
+      - ./data/sounds-custom:/app/sounds/custom
+    restart: "no"
+
+  # Linux Voice Assistant
+  linux-voice-assistant:
+    container_name: linux-voice-assistant
+    image: "${LVA_IMAGE:-tantra35/lva}:${LVA_IMAGE_TAG:-0.0.1-p01}"
+    restart: unless-stopped
+    network_mode: "host"
+
+    user: "${LVA_USER_ID:-0}:${LVA_USER_GROUP:-0}"
+
+    environment:
+      # Pulseaudio (systemwide pipewire-pulse)
+      - XDG_RUNTIME_DIR=${LVA_XDG_RUNTIME_DIR:-/run}
+      - PULSE_SERVER=${LVA_PULSE_SERVER:-/run/pipewire/pulse/native}
+      - PULSE_COOKIE=${LVA_PULSE_COOKIE:-DISABLED}
+      # --- Site config (Marusia satellite on the nanopi) -------------------
+      # Audio endpoints are the PipeWire pulse-tunnel nodes from
+      # 20-shtab-marusia.conf, both referenced by their node.name:
+      # - input: soundcard matches the pulse source NAME exactly first
+      #   (pulseaudio.py _match_soundcard), so a bare node.name works
+      # - output: mpv enumerates devices per driver, the "pulse/" prefix
+      #   selects the pulse driver, followed by the same node.name
+      - AUDIO_INPUT_DEVICE=shtab_mic
+      - AUDIO_OUTPUT_DEVICE=pulse/shtab_sink
+      # Noise suppression in LVA (webrtc NS); the speaker's echo-cancel is off
+      - MIC_NOISE_SUPPRESSION=1
+      # sherpa-onnx KWS wake word: engine is picked by "type": "sherpa-onnx"
+      # in the model JSONs found in WAKE_WORD_DIR (wake_word.py). Discovery
+      # only globs the TOP LEVEL of each dir, so models go directly into
+      # ./data/wakeword-custom on the nanopi (natashka.json + .onnx files,
+      # stop model files; see wakewords/sherpa-onnx/*.EXAMPLE)
+      - WAKE_WORD_DIR=/app/wakewords/custom
+      - WAKE_MODEL=natashka
+      - STOP_MODEL=stop
+      # Peripheral WebSocket API, client mode: LVA dials OUT to the endpoint
+      # held by marusia-d on the speaker (all connections toward the speaker)
+      - PERIPHERAL_CONNECT=ws://192.168.88.107:6055
+
+    env_file: ${ENV_FILE:-.env}
+    group_add:
+      - audio
+    # Rockchip accel devices need unrestricted AppArmor and /proc/sys paths
+    security_opt:
+      - apparmor=unconfined
+      - systempaths=unconfined
+    # Per-process fd limit (RLIMIT_NOFILE) for the RKNN sherpa-onnx runtime:
+    # the same setrlimit(2048, 2048) that wyoming-sherpa-onnx-kws does in
+    # code, applied by Docker before the process starts. Without it the
+    # default may be as low as 1024 and RKNN/model loading hits EMFILE.
+    ulimits:
+      nofile:
+        soft: 2048
+        hard: 2048
+    devices:
+      # RK3588 hardware accel: DRM/GPU, DMA-BUF heaps, RGA 2D blitter and
+      # the Rockchip media (VPU/JPEG) service
+      - /dev/dri
+      - /dev/dma_heap
+      - /dev/rga
+      - /dev/mpp_service
+    volumes:
+      # Wakeword data and configuration — plain host dirs (relative to this
+      # compose file) instead of named volumes, so everything is inspectable
+      # on the nanopi:
+      # - ./data/wakeword-data    -> /app/local            (download dir for HA-supplied models)
+      # - ./data/wakeword-custom  -> /app/wakewords/custom (manually provided models)
+      - ./data/wakeword-data:/app/local
+      - ./data/wakeword-custom:/app/wakewords/custom
+      - ./data/configuration:/app/configuration
+      - ./data/sounds-custom:/app/sounds/custom
+      # Time and zone
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+      # Pulseaudio: systemwide pipewire-pulse dir; mounted as a DIRECTORY so a
+      # pipewire restart (which recreates the socket inode) doesn't stale a
+      # file-level bind
+      - /run/pipewire:/run/pipewire
+
+    depends_on:
+      - fix-permissions
+
+    # Health check for process
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "linux_voice_assistant"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
+

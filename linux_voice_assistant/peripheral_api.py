@@ -7,6 +7,13 @@ Protocol (JSON over WebSocket):
   Commands (peripheral → LVA): {"command": "<name>", "data": {...}}
   Snapshot (on connect):       {"event": "snapshot", "data": {...}}
 
+Connection modes
+----------------
+  Server (default): LVA listens on port 6055 and peripherals connect to it.
+  Client (--peripheral-connect): LVA dials out to the WebSocket endpoint on
+  the speaker (for example the marusia-d daemon) instead of listening. The
+  JSON protocol is identical — only who initiates the TCP connection flips.
+
 Feedback events emitted by LVA
 -------------------------------
   wake_word_detected
@@ -45,6 +52,11 @@ Feedback events emitted by LVA
                         voice pipeline announcements — those use tts_speaking.
   volume_changed        data: {"volume": 0.0–1.0}
   volume_muted          data: {"muted": true/false}
+  duck_changed          data: {"ducked": true/false}
+              Emitted when the satellite ducks/unducks the music player
+              around TTS and voice-pipeline activity. The peripheral can
+              lower (and restore) its own playback volume to keep the
+              ducking effective when the mpv player runs on another host.
   zeroconf              data: {"status": "getting_started" | "connected"}
   light_command         data: {"object_id": str, "state": bool, "brightness": float,
                               "red": float, "green": float, "blue": float, "effect": str}
@@ -95,8 +107,8 @@ Commands accepted from the peripheral container
               same object_id are ignored.
   register_button
               The peripheral declares that it has physical buttons and
-              wants a Button Press event entity exposed in HA. LVA
-              creates a ButtonEventSensorEntity (visible as
+              wants a Button Press event entity exposed in HA. LVA creates
+              a ButtonEventSensorEntity (visible as
               event.<satellite>_button_press_event) that fires
               single_press, double_press, triple_press, and long_press
               events to Home Assistant when the corresponding
@@ -122,7 +134,7 @@ import json
 import logging
 import time
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Dict, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
 
 from aioesphomeapi.api_pb2 import MediaPlayerStateResponse  # type: ignore[attr-defined]  # pylint: disable=no-name-in-module
 from aioesphomeapi.model import MediaPlayerState  # type: ignore[import]
@@ -152,6 +164,7 @@ class LVAEvent(str, Enum):
     DISCONNECTED = "disconnected"
     IDLE = "idle"
     MUTED = "muted"
+    DUCKED = "duck_changed"
     TIMER_TICKING = "timer_ticking"
     TIMER_UPDATED = "timer_updated"
     TIMER_RINGING = "timer_ringing"
@@ -187,13 +200,19 @@ class LVACommand(str, Enum):
 
 
 # ---------------------------------------------------------------------------
-# Server
+# Shared bridge logic
 # ---------------------------------------------------------------------------
 
 
-class PeripheralAPIServer:
+class PeripheralAPIBridge:
     """
-    WebSocket server that bridges LVA state to a peripheral container.
+    LVA-side logic shared by the peripheral API server and client modes.
+
+    Holds the attached ``ServerState``, the command dispatcher, entity
+    registration, event bookkeeping and the snapshot payload. Subclasses
+    decide how frames travel: ``PeripheralAPIServer`` accepts incoming
+    peripheral connections, ``PeripheralAPIClient`` dials out to the
+    endpoint on the speaker.
 
     Usage
     -----
@@ -209,18 +228,12 @@ class PeripheralAPIServer:
 
     def __init__(
         self,
-        host: str = "0.0.0.0",
-        port: int = 6055,
         volume_step: float = DEFAULT_VOLUME_STEP,
     ) -> None:
-        self._host = host
-        self._port = port
         self._volume_step = volume_step
 
-        self._clients: Set[Any] = set()
         self._state: Optional[ServerState] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._server: Any = None
 
         # Last conversation exchange — sent in the snapshot to newly-connecting clients
         self._last_stt_text: Optional[str] = None
@@ -247,90 +260,77 @@ class PeripheralAPIServer:
         self._state = state
 
     async def start(self) -> None:
-        """Start the WebSocket server inside the running event loop."""
-        try:
-            from websockets.server import serve  # type: ignore[import]
-        except ImportError:
-            _LOGGER.error("websockets package not installed – peripheral API disabled. Install with: pip install websockets")
-            return
-
-        self._loop = asyncio.get_running_loop()
-        self._server = await serve(self._handle_client, self._host, self._port)
-        _LOGGER.info("Peripheral API listening at ws://%s:%d", self._host, self._port)
+        """Start the WebSocket connection handling inside the running event loop."""
+        raise NotImplementedError
 
     async def stop(self) -> None:
-        """Gracefully shut down the server and all client connections."""
-        if self._pending_entity_reconnect_task is not None:
-            self._pending_entity_reconnect_task.cancel()
-            self._pending_entity_reconnect_task = None
-
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
-            _LOGGER.info("Peripheral API stopped")
+        """Gracefully shut down all peripheral connections."""
+        raise NotImplementedError
 
     # ------------------------------------------------------------------
-    # Client handling
+    # Snapshot
     # ------------------------------------------------------------------
 
-    async def _handle_client(self, websocket: Any) -> None:
-        addr = getattr(websocket, "remote_address", "unknown")
-        self._clients.add(websocket)
-        _LOGGER.info("Peripheral client connected: %s", addr)
-
-        await self._send_snapshot(websocket)
-
-        try:
-            async for raw in websocket:
-                await self._dispatch_command(raw)
-        except Exception as exc:  # pylint: disable=broad-except
-            _LOGGER.debug("Peripheral client %s error: %s", addr, exc)
-        finally:
-            self._clients.discard(websocket)
-            _LOGGER.info("Peripheral client disconnected: %s", addr)
-
-    async def _send_snapshot(self, websocket: Any) -> None:
-        """Push current LVA state to a newly connected peripheral client."""
+    def _snapshot_messages(self) -> List[str]:
+        """Snapshot payload plus the replayed current state, ready to send."""
         state = self._state
         if state is None:
-            return
+            return []
 
-        payload = json.dumps(
-            {
-                "event": "snapshot",
-                "data": {
-                    "muted": state.muted,
-                    "volume": round(state.volume, 3),
-                    "volume_muted": state.volume == 0.0,
-                    "ha_connected": state.connected,
-                    "button_controls_locked": state.button_controls_locked,
-                    "last_stt_text": self._last_stt_text,
-                    "last_tts_text": self._last_tts_text,
-                },
-            }
-        )
-        try:
-            await websocket.send(payload)
-        except Exception:  # pylint: disable=broad-except
-            return
+        messages = [
+            json.dumps(
+                {
+                    "event": "snapshot",
+                    "data": {
+                        "muted": state.muted,
+                        "volume": round(state.volume, 3),
+                        "volume_muted": state.volume == 0.0,
+                        "ha_connected": state.connected,
+                        "button_controls_locked": state.button_controls_locked,
+                        "last_stt_text": self._last_stt_text,
+                        "last_tts_text": self._last_tts_text,
+                    },
+                }
+            )
+        ]
 
-        # Replay the current event state so the client immediately shows the
+        # Replay the current event state so the peer immediately shows the
         # right animation — e.g. a timer ticking animation when reconnecting
         # mid-timer, or the muted indicator when reconnecting while muted.
         current_state = self._current_state
         if current_state is None:
-            return
+            return messages
 
         if current_state == LVAEvent.DISCONNECTED and state.connected:
-            return
+            return messages
 
         state_payload: Dict[str, Any] = {"event": current_state.value}
         if self._current_state_data:
             state_payload["data"] = self._current_state_data
-        try:
-            await websocket.send(json.dumps(state_payload))
-        except Exception:  # pylint: disable=broad-except
-            pass
+        messages.append(json.dumps(state_payload))
+        return messages
+
+    async def _send_snapshot(self, websocket: Any) -> None:
+        """Push current LVA state to a newly connected peer."""
+        for message in self._snapshot_messages():
+            try:
+                await websocket.send(message)
+            except Exception:  # pylint: disable=broad-except
+                return
+
+    # ------------------------------------------------------------------
+    # Sending
+    # ------------------------------------------------------------------
+
+    async def _send_to_peers(self, raw_msg: str) -> None:
+        """Deliver one raw event message to every connected peer."""
+        raise NotImplementedError
+
+    def _cancel_pending_entity_reconnect(self) -> None:
+        """Cancel a pending late-entity HA reconnect, if any."""
+        if self._pending_entity_reconnect_task is not None:
+            self._pending_entity_reconnect_task.cancel()
+            self._pending_entity_reconnect_task = None
 
     # ------------------------------------------------------------------
     # Command dispatch
@@ -382,8 +382,9 @@ class PeripheralAPIServer:
             new_vol = max(0.0, min(1.0, state.volume + delta))
             vol_pct = int(round(new_vol * 100))
 
+            # TTS volume is intentionally untouched: the assistant's voice
+            # stays at its own fixed level, decoupled from the player volume.
             state.music_player.set_volume(vol_pct)
-            state.tts_player.set_volume(vol_pct)
 
             if state.media_player_entity is not None:
                 state.media_player_entity.volume = new_vol
@@ -416,8 +417,9 @@ class PeripheralAPIServer:
             new_vol = max(0.0, min(1.0, float(volume)))
             vol_pct = int(round(new_vol * 100))
 
+            # TTS volume is intentionally untouched: the assistant's voice
+            # stays at its own fixed level, decoupled from the player volume.
             state.music_player.set_volume(vol_pct)
-            state.tts_player.set_volume(vol_pct)
 
             if state.media_player_entity is not None:
                 state.media_player_entity.volume = new_vol
@@ -461,6 +463,7 @@ class PeripheralAPIServer:
         elif command == LVACommand.PAUSE_MEDIA_PLAYER:
             state.music_player.pause()
             if state.media_player_entity is not None:
+
                 state.media_player_entity.state = MediaPlayerState.PAUSED
                 if satellite is not None:
                     satellite.send_messages([self._create_media_player_response(MediaPlayerState.PAUSED)])
@@ -468,6 +471,7 @@ class PeripheralAPIServer:
         elif command == LVACommand.RESUME_MEDIA_PLAYER:
             state.music_player.resume()
             if state.media_player_entity is not None:
+
                 state.media_player_entity.state = MediaPlayerState.PLAYING
                 if satellite is not None:
                     satellite.send_messages([self._create_media_player_response(MediaPlayerState.PLAYING)])
@@ -587,8 +591,8 @@ class PeripheralAPIServer:
         When the satellite is already running, the entity is materialised
         immediately so a subsequent switch toggle routes correctly. HA
         only sees the new entity after the integration is reloaded, but
-        the same startup-wait window that applies to register_light
-        applies here too (see --peripheral-startup-wait).
+        the same startup-wait window that applies to register_light applies
+        here too (see --peripheral-startup-wait).
         """
         state = self._state
         if state is None:
@@ -711,6 +715,7 @@ class PeripheralAPIServer:
             LVAEvent.TTS_FINISHED,
             LVAEvent.IDLE,
             LVAEvent.MUTED,
+            LVAEvent.DUCKED,
             LVAEvent.TIMER_TICKING,
             LVAEvent.TIMER_RINGING,
             LVAEvent.MEDIA_PLAYER_PLAYING,
@@ -725,28 +730,11 @@ class PeripheralAPIServer:
             # Keep state as TIMER_TICKING but refresh the countdown data
             self._current_state_data = data or None
 
-        if not self._clients:
-            return
-
         payload: Dict[str, Any] = {"event": event.value}
         if data:
             payload["data"] = data
 
-        raw_msg = json.dumps(payload)
-        dead: Set[Any] = set()
-
-        for ws in list(self._clients):
-            try:
-                await ws.send(raw_msg)
-            except Exception:  # pylint: disable=broad-except
-                dead.add(ws)
-
-        self._clients -= dead
-        _LOGGER.debug(
-            "Peripheral event %-25s → %d client(s)",
-            event.value,
-            len(self._clients),
-        )
+        await self._send_to_peers(json.dumps(payload))
 
     def emit_event_sync(
         self,
@@ -775,3 +763,190 @@ class PeripheralAPIServer:
             volume=media_entity.volume,
             muted=media_entity.muted,
         )
+
+
+# ---------------------------------------------------------------------------
+# Server
+# ---------------------------------------------------------------------------
+
+
+class PeripheralAPIServer(PeripheralAPIBridge):
+    """
+    WebSocket server that bridges LVA state to a peripheral container.
+
+    The peripheral script or container connects to LVA as a client.
+    See ``PeripheralAPIClient`` for the reverse mode where LVA dials
+    out to the endpoint on the speaker.
+    """
+
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 6055,
+        volume_step: float = PeripheralAPIBridge.DEFAULT_VOLUME_STEP,
+    ) -> None:
+        super().__init__(volume_step=volume_step)
+        self._host = host
+        self._port = port
+        self._clients: Set[Any] = set()
+        self._server: Any = None
+
+    async def start(self) -> None:
+        """Start the WebSocket server inside the running event loop."""
+        try:
+            from websockets.server import serve  # type: ignore[import]
+        except ImportError:
+            _LOGGER.error("websockets package not installed – peripheral API disabled. Install with: pip install websockets")
+            return
+
+        self._loop = asyncio.get_running_loop()
+        self._server = await serve(self._handle_client, self._host, self._port)
+        _LOGGER.info("Peripheral API listening at ws://%s:%d", self._host, self._port)
+
+    async def stop(self) -> None:
+        """Gracefully shut down the server and all client connections."""
+        self._cancel_pending_entity_reconnect()
+
+        if self._server is not None:
+            self._server.close()
+            await self._server.wait_closed()
+            _LOGGER.info("Peripheral API stopped")
+
+    async def _send_to_peers(self, raw_msg: str) -> None:
+        """Broadcast one raw event message to every connected client."""
+        if not self._clients:
+            return
+
+        dead: Set[Any] = set()
+
+        for ws in list(self._clients):
+            try:
+                await ws.send(raw_msg)
+            except Exception:  # pylint: disable=broad-except
+                dead.add(ws)
+
+        self._clients -= dead
+        _LOGGER.debug(
+            "Peripheral event %-25s → %d client(s)",
+            json.loads(raw_msg)["event"],
+            len(self._clients),
+        )
+
+    # ------------------------------------------------------------------
+    # Client handling
+    # ------------------------------------------------------------------
+
+    async def _handle_client(self, websocket: Any) -> None:
+        addr = getattr(websocket, "remote_address", "unknown")
+        self._clients.add(websocket)
+        _LOGGER.info("Peripheral client connected: %s", addr)
+
+        await self._send_snapshot(websocket)
+
+        try:
+            async for raw in websocket:
+                await self._dispatch_command(raw)
+        except Exception as exc:  # pylint: disable=broad-except
+            _LOGGER.debug("Peripheral client %s error: %s", addr, exc)
+        finally:
+            self._clients.discard(websocket)
+            _LOGGER.info("Peripheral client disconnected: %s", addr)
+
+
+# ---------------------------------------------------------------------------
+# Client
+# ---------------------------------------------------------------------------
+
+
+class PeripheralAPIClient(PeripheralAPIBridge):
+    """
+    WebSocket client that connects LVA out to a peripheral endpoint on the
+    speaker (for example the marusia-d daemon) instead of running a server.
+
+    The JSON protocol is identical to the server mode — only the connection
+    direction is reversed: LVA dials the endpoint, sends its snapshot on
+    connect, then sends events to and receives commands from the endpoint.
+    The connection is re-established automatically with exponential backoff.
+    """
+
+    RECONNECT_INITIAL_DELAY_S: float = 1.0
+    RECONNECT_MAX_DELAY_S: float = 30.0
+
+    def __init__(
+        self,
+        url: str,
+        volume_step: float = PeripheralAPIBridge.DEFAULT_VOLUME_STEP,
+    ) -> None:
+        super().__init__(volume_step=volume_step)
+        self._url = url
+        self._ws: Optional[Any] = None
+        self._task: Optional[asyncio.Task] = None
+        self._connect_factory: Optional[Any] = None
+
+    async def start(self) -> None:
+        """Start the reconnecting WebSocket client inside the running event loop."""
+        try:
+            from websockets.client import connect  # type: ignore[import]
+        except ImportError:
+            _LOGGER.error("websockets package not installed – peripheral API disabled. Install with: pip install websockets")
+            return
+
+        self._loop = asyncio.get_running_loop()
+        self._connect_factory = connect
+        self._task = self._loop.create_task(self._run())
+        _LOGGER.info("Peripheral API connecting to %s", self._url)
+
+    async def stop(self) -> None:
+        """Cancel the client task and close the connection."""
+        self._cancel_pending_entity_reconnect()
+
+        if self._task is not None:
+            self._task.cancel()
+            self._task = None
+
+        if self._ws is not None:
+            await self._ws.close()
+            self._ws = None
+
+        _LOGGER.info("Peripheral API client stopped")
+
+    # ------------------------------------------------------------------
+    # Private
+    # ------------------------------------------------------------------
+
+    async def _run(self) -> None:
+        """Connect, serve the connection and reconnect with backoff forever."""
+        assert self._connect_factory is not None
+        delay = self.RECONNECT_INITIAL_DELAY_S
+
+        while True:
+            try:
+                async with self._connect_factory(self._url) as websocket:
+                    self._ws = websocket
+                    delay = self.RECONNECT_INITIAL_DELAY_S
+                    _LOGGER.info("Peripheral API connected to %s", self._url)
+                    await self._send_snapshot(websocket)
+                    async for raw in websocket:
+                        await self._dispatch_command(raw)
+            except Exception as exc:  # pylint: disable=broad-except
+                _LOGGER.warning("Peripheral API connection to %s lost: %s", self._url, exc)
+            finally:
+                self._ws = None
+
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, self.RECONNECT_MAX_DELAY_S)
+
+    async def _send_to_peers(self, raw_msg: str) -> None:
+        """Send one raw event message to the endpoint on the speaker."""
+        ws = self._ws
+        if ws is None:
+            _LOGGER.debug(
+                "Peripheral event %-25s → dropped (not connected)",
+                json.loads(raw_msg)["event"],
+            )
+            return
+
+        try:
+            await ws.send(raw_msg)
+        except Exception:  # pylint: disable=broad-except
+            pass

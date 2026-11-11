@@ -194,7 +194,7 @@ Environment=PREFERENCES_FILE="/home/pi/linux-voice-assistant/preferences.json"
 # Environment=WAKEUP_SOUND="sounds/wake_word_triggered.flac"
 # Environment=START_LISTENING_SOUND="sounds/start_listening_button.flac"
 # Environment=TIMER_FINISHED_SOUND="sounds/timer_finished.flac"
-# Environment=PROCESSING_SOUND="sounds/processing.wav"
+# Environment=PROCESSING_SOUND="sounds/thinking.wav"
 # Environment=LISTEN_DURING_WAKE_SOUND="0"
 # Environment=MUTE_SOUND="sounds/mute_switch_on.flac"
 # Environment=UNMUTE_SOUND="sounds/mute_switch_off.flac"
@@ -296,7 +296,7 @@ The following variables can be configured in the `.env` or in the service file:
 | `WAKEUP_SOUND` | `sounds/wake_word_triggered.flac` | Sound file for wake word triggered |
 | `START_LISTENING_SOUND` | `sounds/start_listening_button.flac` | Sound file for pressing button to talk |
 | `TIMER_FINISHED_SOUND` | `sounds/timer_finished.flac` | Sound file for timer finished |
-| `PROCESSING_SOUND` | `sounds/processing.wav` | Sound file for processing state |
+| `PROCESSING_SOUND` | `sounds/thinking.wav` | Sound file for processing state |
 | `LISTEN_DURING_WAKE_SOUND` | false | Set to "1" to start listening immediately after wake word detection, without waiting for the wake sound to finish |
 | `MUTE_SOUND` | `sounds/mute_switch_on.flac` | Sound file for mute on |
 | `UNMUTE_SOUND` | `sounds/mute_switch_off.flac` | Sound file for mute off |
@@ -307,6 +307,7 @@ The following variables can be configured in the `.env` or in the service file:
 | `PERIPHERAL_HOST` | 0.0.0.0 | Host for the peripheral WebSocket API |
 | `PERIPHERAL_PORT` | 6055 | Port for the peripheral WebSocket API |
 | `PERIPHERAL_VOLUME_STEP` | %(default)s | Volume change per button press |
+| `PERIPHERAL_CONNECT` | — | Connect LVA as a WebSocket client to this peripheral endpoint (e.g. `ws://speaker:6055`) instead of running the peripheral WebSocket server |
 | `PERIPHERAL_STARTUP_WAIT` | `2.0` | Seconds to wait for peripherals to register entities before Home Assistant enumerates them (0 to skip) |
 | `DISABLE_PERIPHERAL_API` | false | Disable the peripheral WebSocket API |
 | `ENABLE_OUTPUT_ONLY` | (optional) | Set to "1" to enable output-only mode |

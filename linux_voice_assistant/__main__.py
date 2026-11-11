@@ -17,7 +17,7 @@ from aioesphomeapi.api_pb2 import NumberStateResponse  # type: ignore  # pylint:
 
 from .models import AUDIO_SAMPLE_RATE, Preferences, ServerState, WakeWordType, initial_stop_word_threshold
 from .mpv_player import MpvMediaPlayer
-from .peripheral_api import LVAEvent, PeripheralAPIServer
+from .peripheral_api import LVAEvent, PeripheralAPIBridge, PeripheralAPIClient, PeripheralAPIServer
 from .satellite import VoiceSatelliteProtocol
 from .sherpa_kws import SherpaKwsWakeWord
 from .util import (
@@ -140,7 +140,7 @@ async def main() -> None:
     )
     parser.add_argument(
         "--processing-sound",
-        default=str(_SOUNDS_DIR / "processing.wav"),
+        default=str(_SOUNDS_DIR / "thinking.wav"),
         help="Short sound to play while assistant is processing (thinking)",
     )
     parser.add_argument(
@@ -217,6 +217,11 @@ async def main() -> None:
         type=int,
         default=6055,
         help="Port for the peripheral WebSocket API (default: 6055)",
+    )
+    parser.add_argument(
+        "--peripheral-connect",
+        metavar="URL",
+        help="Connect to the peripheral WebSocket endpoint on the speaker as a client (for example ws://speaker:6055) instead of running the peripheral WebSocket server",
     )
     parser.add_argument(
         "--peripheral-volume-step",
@@ -513,19 +518,28 @@ async def main() -> None:
         state.save_preferences()
 
     initial_volume_percent = int(round(initial_volume * 100))
+    # TTS player keeps its own fixed volume (mpv default 100%): the
+    # assistant's voice is decoupled from the media player volume.
     state.music_player.set_volume(initial_volume_percent)
-    state.tts_player.set_volume(initial_volume_percent)
 
     # ------------------------------------------------------------------
     # Peripheral API (optional – LEDs, buttons, HAT boards)
     # ------------------------------------------------------------------
-    peripheral_api: Optional[PeripheralAPIServer] = None
-    if not args.disable_peripheral_api:
+    peripheral_api: Optional[PeripheralAPIBridge] = None
+    if args.disable_peripheral_api:
+        pass
+    elif args.peripheral_connect:
+        peripheral_api = PeripheralAPIClient(
+            url=args.peripheral_connect,
+            volume_step=args.peripheral_volume_step,
+        )
+    else:
         peripheral_api = PeripheralAPIServer(
             host=args.peripheral_host,
             port=args.peripheral_port,
             volume_step=args.peripheral_volume_step,
         )
+    if peripheral_api is not None:
         peripheral_api.set_state(state)
         state.peripheral_api = peripheral_api
 
