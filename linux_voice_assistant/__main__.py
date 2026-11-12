@@ -76,6 +76,13 @@ async def main() -> None:
         help="mpv name for the music/media output device (defaults to --audio-output-device)",
     )
     parser.add_argument(
+        "--tts-volume",
+        type=int,
+        default=100,
+        choices=list(range(1, 101)),
+        help="Volume level (1 to 100) for the assistant's voice (TTS/announce sounds), independent of the media player volume",
+    )
+    parser.add_argument(
         "--list-output-devices",
         action="store_true",
         help="List audio output devices and exit",
@@ -518,9 +525,10 @@ async def main() -> None:
         state.save_preferences()
 
     initial_volume_percent = int(round(initial_volume * 100))
-    # TTS player keeps its own fixed volume (mpv default 100%): the
-    # assistant's voice is decoupled from the media player volume.
+    # TTS player keeps its own fixed volume (decoupled from the media player
+    # volume); --tts-volume / TTS_VOLUME sets it once at startup (default 100%).
     state.music_player.set_volume(initial_volume_percent)
+    state.tts_player.set_volume(args.tts_volume)
 
     # ------------------------------------------------------------------
     # Peripheral API (optional – LEDs, buttons, HAT boards)
