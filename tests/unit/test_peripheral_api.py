@@ -30,11 +30,21 @@ def make_server(state=None) -> PeripheralAPIServer:
 
 
 def make_media_entity(key: int = 1, volume: float = 0.5, muted: bool = False):
-    entity = MagicMock()
-    entity.key = key
-    entity.volume = volume
+    """A REAL MediaPlayerEntity so facade methods apply to real state."""
+    from linux_voice_assistant.entity import MediaPlayerEntity
+
+    server = MagicMock()
+    server.state = None
+    entity = MediaPlayerEntity(
+        server=server,
+        key=key,
+        name="Media Player",
+        object_id="media_player",
+        music_player=MagicMock(),
+        announce_player=MagicMock(),
+        initial_volume=volume,
+    )
     entity.muted = muted
-    entity.previous_volume = volume
     return entity
 
 

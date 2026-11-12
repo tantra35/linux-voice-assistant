@@ -315,6 +315,26 @@ class TestExternalMediaPlayerRouting:
         entity.server.state.peripheral_api.send_external_player_sync.assert_not_called()
 
 
+class TestFacadeReportMethods:
+    def test_apply_reported_state_updates_and_returns_response(self):
+        entity = make_media_player()
+
+        response = entity.apply_reported_state(MediaPlayerState.PLAYING)
+
+        assert entity.state == MediaPlayerState.PLAYING
+        assert isinstance(response, MediaPlayerStateResponse)
+        assert response.state == MediaPlayerState.PLAYING
+
+    def test_apply_reported_volume_clamps_and_returns_response(self):
+        entity = make_media_player(initial_volume=0.4)
+
+        response = entity.apply_reported_volume(1.7)
+
+        assert entity.volume == 1.0
+        assert entity.previous_volume == 1.0
+        assert isinstance(response, MediaPlayerStateResponse)
+
+
 class TestMediaPlayerEntityMuteUnmute:
     def test_mute_sets_volume_to_zero(self):
         entity = make_media_player(initial_volume=0.8)

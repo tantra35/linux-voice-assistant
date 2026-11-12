@@ -461,7 +461,10 @@ class PeripheralAPIBridge:
                 # Already in sync; pushing/persisting again would only echo.
                 return
 
-            self._push_media_volume(state, satellite, new_vol)
+            if state.media_player_entity is not None:
+                response = state.media_player_entity.apply_reported_volume(new_vol)
+                if satellite is not None:
+                    satellite.send_messages([response])
 
             state.persist_volume(new_vol, emit_event=False)
 
@@ -485,7 +488,10 @@ class PeripheralAPIBridge:
             # stays at its own fixed level, decoupled from the player volume.
             state.music_player.set_volume(vol_pct)
 
-            self._push_media_volume(state, satellite, new_vol)
+            if state.media_player_entity is not None:
+                response = state.media_player_entity.apply_reported_volume(new_vol)
+                if satellite is not None:
+                    satellite.send_messages([response])
 
             # persist_volume also emits VOLUME_CHANGED via models.py
             state.persist_volume(new_vol)
@@ -814,9 +820,9 @@ class PeripheralAPIBridge:
             return
 
         if state.media_player_entity is not None:
-            state.media_player_entity.state = new_state
+            response = state.media_player_entity.apply_reported_state(new_state)
             if satellite is not None:
-                satellite.send_messages([self._create_media_player_response(new_state)])
+                satellite.send_messages([response])
 
         # Inform the other peripherals (external mode only — local mode
         # emits nothing on state changes, as upstream LVA).
@@ -864,32 +870,6 @@ class PeripheralAPIBridge:
             _LOGGER.debug("External player instruction %s sent", event.value)
         except Exception:  # pylint: disable=broad-except
             _LOGGER.debug("External player instruction %s failed to send", event.value)
-
-    def _push_media_volume(self, state: "ServerState", satellite: Any, volume: float) -> None:
-        """Update the HA media player entity volume and push the state to HA.
-
-        Bookkeeping only — the caller decides whether the music player
-        volume itself is written (HA-initiated changes, peripheral
-        set_volume) or left alone (peripheral volume_changed reports).
-        """
-        if state.media_player_entity is None:
-            return
-
-        state.media_player_entity.volume = volume
-        state.media_player_entity.previous_volume = volume
-
-        # Push the new volume to HA so its media player entity updates in real time
-        if satellite is not None:
-            satellite.send_messages(
-                [
-                    MediaPlayerStateResponse(
-                        key=state.media_player_entity.key,
-                        state=state.media_player_entity.state,
-                        volume=volume,
-                        muted=state.media_player_entity.muted,
-                    )
-                ]
-            )
 
     async def _push_mute_switch(self, satellite: Any, *, muted: bool) -> None:
         """Reflect a peripheral-triggered mute change to Home Assistant."""
