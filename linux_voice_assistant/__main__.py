@@ -231,13 +231,6 @@ async def main() -> None:
         help="Connect to the peripheral WebSocket endpoint on the speaker as a client (for example ws://speaker:6055) instead of running the peripheral WebSocket server",
     )
     parser.add_argument(
-        "--peripheral-volume-step",
-        type=float,
-        default=PeripheralAPIServer.DEFAULT_VOLUME_STEP,
-        metavar="STEP",
-        help="Volume change per button press, 0.0–1.0 (default: %(default)s)",
-    )
-    parser.add_argument(
         "--disable-peripheral-api",
         action="store_true",
         help="Disable the peripheral WebSocket API entirely",
@@ -539,13 +532,11 @@ async def main() -> None:
     elif args.peripheral_connect:
         peripheral_api = PeripheralAPIClient(
             url=args.peripheral_connect,
-            volume_step=args.peripheral_volume_step,
         )
     else:
         peripheral_api = PeripheralAPIServer(
             host=args.peripheral_host,
             port=args.peripheral_port,
-            volume_step=args.peripheral_volume_step,
         )
     if peripheral_api is not None:
         peripheral_api.set_state(state)

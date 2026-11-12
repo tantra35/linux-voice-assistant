@@ -1,7 +1,7 @@
 import logging
 from abc import abstractmethod
 from collections.abc import Iterable
-from typing import Callable, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 # pylint: disable=no-name-in-module
 from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
@@ -37,6 +37,7 @@ from google.protobuf import message
 
 from .api_server import APIServer
 from .mpv_player import MpvMediaPlayer
+from .peripheral_api import ExternalPlayerEvent
 from .util import call_all
 
 SUPPORTED_MEDIA_PLAYER_FEATURES = (
@@ -89,6 +90,24 @@ class MediaPlayerEntity(ESPHomeEntity):
         self.apply_volume_from_state(initial_volume)
         self._log = logging.getLogger(f"{self.__class__.__name__}[{self.key}]")
 
+    def _external_player_mode(self) -> bool:
+        """True when a peripheral registered itself as the media player."""
+        state = getattr(self.server, "state", None)
+        return bool(state is not None and state.external_media_player)
+
+    def _instruct_external_player(
+        self,
+        event: ExternalPlayerEvent,
+        data: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Forward a playback instruction to the external player (fire-and-forget)."""
+        state = getattr(self.server, "state", None)
+        api = getattr(state, "peripheral_api", None) if state is not None else None
+        if api is None:
+            self._log.debug("External player instruction %s dropped (no peripheral API)", event.value)
+            return
+        api.send_external_player_sync(event, data)
+
     def _broadcast_state(self, msgs: Iterable[message.Message]) -> None:
         """Push an asynchronous state change to all connected clients.
 
@@ -108,6 +127,16 @@ class MediaPlayerEntity(ESPHomeEntity):
         announcement: bool = False,
         done_callback: Optional[Callable[[], None]] = None,
     ) -> Iterable[message.Message]:
+        if self._external_player_mode():
+            # The registered external player owns playback: forward the URL
+            # and let it report the real state via media_player_state.
+            self._instruct_external_player(
+                ExternalPlayerEvent.PLAY,
+                {"media_url": url, "announcement": announcement},
+            )
+            yield self._update_state(MediaPlayerState.PLAYING)
+            return
+
         if announcement:
             self._log.debug("PLAY: announcement true")
             if self.music_player.is_paused:
@@ -170,17 +199,26 @@ class MediaPlayerEntity(ESPHomeEntity):
 
                 if msg.command == MediaPlayerCommand.PAUSE:
                     self._log.debug("Executing PAUSE")
-                    self.music_player.pause()
+                    if self._external_player_mode():
+                        self._instruct_external_player(ExternalPlayerEvent.PAUSE)
+                    else:
+                        self.music_player.pause()
                     yield self._update_state(MediaPlayerState.PAUSED)
 
                 elif msg.command == MediaPlayerCommand.PLAY:
                     self._log.debug("Executing PLAY / RESUME")
-                    self.music_player.resume()
+                    if self._external_player_mode():
+                        self._instruct_external_player(ExternalPlayerEvent.RESUME)
+                    else:
+                        self.music_player.resume()
                     yield self._update_state(MediaPlayerState.PLAYING)
 
                 elif command == MediaPlayerCommand.STOP:
                     self._log.debug("Executing STOP")
-                    self.music_player.stop()
+                    if self._external_player_mode():
+                        self._instruct_external_player(ExternalPlayerEvent.STOP)
+                    else:
+                        self.music_player.stop()
                     yield self._update_state(MediaPlayerState.IDLE)
 
                 elif command == MediaPlayerCommand.MUTE:
@@ -188,7 +226,10 @@ class MediaPlayerEntity(ESPHomeEntity):
                     if not self.muted:
                         self.previous_volume = self.volume
                         self.volume = 0
-                        self.music_player.set_volume(0)
+                        if self._external_player_mode():
+                            self._instruct_external_player(ExternalPlayerEvent.SET_VOLUME, {"volume": 0.0})
+                        else:
+                            self.music_player.set_volume(0)
                         self.muted = True
                         if hasattr(self.server, "state") and getattr(self.server, "state", None) is not None:
                             self.server.state.persist_volume(self.volume)
@@ -198,7 +239,10 @@ class MediaPlayerEntity(ESPHomeEntity):
                     self._log.debug("Executing UNMUTE")
                     if self.muted:
                         self.volume = self.previous_volume
-                        self.music_player.set_volume(int(self.volume * 100))
+                        if self._external_player_mode():
+                            self._instruct_external_player(ExternalPlayerEvent.SET_VOLUME, {"volume": float(self.volume)})
+                        else:
+                            self.music_player.set_volume(int(self.volume * 100))
                         self.muted = False
                         if hasattr(self.server, "state") and getattr(self.server, "state", None) is not None:
                             self.server.state.persist_volume(self.volume)
@@ -272,7 +316,12 @@ class MediaPlayerEntity(ESPHomeEntity):
         # Only the music player follows the volume; the announce (TTS)
         # player stays at its own fixed volume so adjusting the media
         # player volume never changes the assistant's voice.
-        self.music_player.set_volume(volume_percent)
+        if self._external_player_mode():
+            # The external player owns the real volume: forward the value;
+            # it applies it physically and reports back via volume_changed.
+            self._instruct_external_player(ExternalPlayerEvent.SET_VOLUME, {"volume": normalized})
+        else:
+            self.music_player.set_volume(volume_percent)
 
         self.volume = normalized
 

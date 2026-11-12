@@ -161,8 +161,7 @@
         <button class="cmd-btn danger"  onclick="send('stop_timer_ringing')">■ Stop timer ringing</button>
         <button class="cmd-btn"         onclick="send('mute_mic')">Mute microphone</button>
         <button class="cmd-btn"         onclick="send('unmute_mic')">Unmute microphone</button>
-        <button class="cmd-btn"         onclick="send('volume_up')">Volume up</button>
-        <button class="cmd-btn"         onclick="send('volume_down')">Volume down</button>
+        <button class="cmd-btn"         onclick="sendVolumeChanged()">Report volume change</button>
         <button class="cmd-btn"         onclick="send('pause_media_player')">⏸ Pause media player</button>
         <button class="cmd-btn"         onclick="send('resume_media_player')">▶ Resume media player</button>
         <button class="cmd-btn"         onclick="send('stop_media_player')">■ Stop media player</button>
@@ -437,6 +436,17 @@
     if (data) msg.data = data;
     ws.send(JSON.stringify(msg));
     log('sent', '↑ ' + command, data ? JSON.stringify(data) : '');
+  }
+
+  function sendVolumeChanged() {
+    const volumeInput = document.getElementById('volume-input');
+    const volume = parseFloat(volumeInput.value);
+
+    if (isNaN(volume)) {
+      log('err-item', '✗ invalid volume — enter 0.0–1.0');
+      return;
+    }
+    send('volume_changed', { volume });
   }
 
   function sendSetVolume() {

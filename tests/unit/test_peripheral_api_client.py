@@ -61,10 +61,6 @@ class TestClientInit:
         client = PeripheralAPIClient(url="ws://speaker:6055")
         assert client._url == "ws://speaker:6055"  # pylint: disable=protected-access
 
-    def test_default_volume_step(self):
-        client = PeripheralAPIClient(url="ws://speaker:6055")
-        assert client._volume_step == 0.05  # pylint: disable=protected-access
-
     def test_no_connection_on_init(self):
         client = PeripheralAPIClient(url="ws://speaker:6055")
         assert client._ws is None  # pylint: disable=protected-access

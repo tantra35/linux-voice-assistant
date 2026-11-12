@@ -70,10 +70,6 @@ services:
       - WAKE_WORD_DIR=/app/wakewords/custom
       - WAKE_MODEL=natashka
       - STOP_MODEL=stop
-      # Volume increment for peripheral volume_up / volume_down commands
-      # (0.0–1.0). Uncomment to pin here; otherwise set PERIPHERAL_VOLUME_STEP
-      # in .env (entrypoint maps it to --peripheral-volume-step). Default 0.05.
-      # - PERIPHERAL_VOLUME_STEP=0.05
       # Peripheral WebSocket API, client mode: LVA dials OUT to the endpoint
       # held by marusia-d on the speaker (all connections toward the speaker)
       - PERIPHERAL_CONNECT=ws://192.168.88.107:6055

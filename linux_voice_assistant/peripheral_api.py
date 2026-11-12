@@ -47,10 +47,20 @@ Feedback events emitted by LVA
   timer_ticking   data: {"id": str, "name": str, "total_seconds": int, "seconds_left": int}
   timer_updated   data: {"id": str, "name": str, "total_seconds": int, "seconds_left": int}
   timer_ringing   data: {"id": str, "name": str, "total_seconds": int, "seconds_left": int}
-  media_player_playing  Emitted when HA sends music/media to the music_player
-                        (non-announcement playback). Not emitted for TTS or
-                        voice pipeline announcements — those use tts_speaking.
+  media_player_playing  The background music player is playing. External-
+                        player mode: emitted from the player's media_player_state
+                        reports (including resumes). Local mode: emitted only
+                        when HA starts streaming new music/media (non-
+                        announcement); pause/resume emit nothing, as upstream.
+                        TTS and announcements use tts_speaking.
+  media_player_paused   The background music player was paused. External-
+                        player mode only: emitted from the player's
+                        media_player_state reports (local mode emits nothing,
+                        as upstream). State event: replayed in the snapshot.
   volume_changed        data: {"volume": 0.0–1.0}
+              Emitted for LVA-side volume changes (HA slider, set_volume).
+              NOT re-emitted when the peripheral itself reported the change
+              via the volume_changed command (feedback-loop break).
   volume_muted          data: {"muted": true/false}
   duck_changed          data: {"ducked": true/false}
               Emitted when the satellite ducks/unducks the music player
@@ -86,9 +96,38 @@ Commands accepted from the peripheral container
                     to HA, unducking music, and emits idle to peripherals.
   mute_mic
   unmute_mic
-  volume_up
-  volume_down
+  volume_changed    data: {"volume": 0.0–1.0}
+              Report from the peripheral that the REAL volume changed
+              (e.g. the speaker's own hardware volume buttons). LVA
+              syncs its state, the HA media player entity and the
+              persisted preferences, but does NOT touch the music
+              player (the change already happened physically) and does
+              NOT re-emit volume_changed back to peripherals — this is
+              the loop break for peripheral-originated changes. A
+              report equal to the current volume is ignored entirely.
   set_volume        data: {"volume": 0.0–1.0}
+              Set the player volume to an exact value. Unlike
+              volume_changed this IS applied (to the local music player,
+              or — in external-player mode from a client other than the
+              player itself — forwarded as a media_player_set_volume
+              instruction).
+  register_media_player
+              The peripheral declares itself the EXTERNAL MEDIA PLAYER.
+              While registered, LVA does not drive its local mpv player at
+              all: HA play/pause/resume/stop/volume requests are forwarded
+              to this connection as instruction events (media_player_play,
+              media_player_pause, media_player_resume, media_player_stop,
+              media_player_set_volume), and the player reports the real
+              outcome back with media_player_state and volume_changed
+              commands. The player MUST send media_player_state whenever
+              its state changes on its own (hardware buttons, end of
+              track). Registration is idempotent and is dropped
+              automatically when the owning connection falls.
+  media_player_state  data: {"state": "playing"|"paused"|"idle"}
+              Callback from the external player — the source of truth for
+              the HA media player entity. LVA updates the entity, pushes
+              the state to HA, and emits media_player_playing /
+              media_player_paused to the other peripherals.
   stop_timer_ringing
   pause_media_player
   resume_media_player
@@ -125,6 +164,20 @@ Commands accepted from the peripheral container
               gate anything on its end. Send once after connecting;
               duplicate registrations are ignored and preserve the
               current lock state.
+
+Instructions to the external media player (LVA → the registered peripheral)
+-----------------------------------------------------------------------------
+  Sent as ordinary event frames, but only to the connection that registered
+  via register_media_player (client mode: the single peer):
+  media_player_play         data: {"media_url": str|list, "announcement": bool}
+  media_player_pause        —
+  media_player_resume       —
+  media_player_stop         —
+  media_player_set_volume   data: {"volume": 0.0–1.0}
+  The external player owns playback while registered; it reports the outcome
+  via media_player_state and volume_changed commands. Requests it originated
+  itself (pause_media_player, set_volume, ...) are NOT echoed back to it —
+  loop break, mirroring the volume_changed report rule.
 """
 
 from __future__ import annotations
@@ -169,6 +222,7 @@ class LVAEvent(str, Enum):
     TIMER_UPDATED = "timer_updated"
     TIMER_RINGING = "timer_ringing"
     MEDIA_PLAYER_PLAYING = "media_player_playing"
+    MEDIA_PLAYER_PAUSED = "media_player_paused"
     VOLUME_CHANGED = "volume_changed"
     VOLUME_MUTED = "volume_muted"
     ZEROCONF = "zeroconf"
@@ -183,8 +237,7 @@ class LVACommand(str, Enum):
     STOP_PIPELINE = "stop_pipeline"
     MUTE_MIC = "mute_mic"
     UNMUTE_MIC = "unmute_mic"
-    VOLUME_UP = "volume_up"
-    VOLUME_DOWN = "volume_down"
+    VOLUME_CHANGED = "volume_changed"
     SET_VOLUME = "set_volume"
     STOP_TIMER_RINGING = "stop_timer_ringing"
     STOP_MEDIA_PLAYER = "stop_media_player"
@@ -197,6 +250,23 @@ class LVACommand(str, Enum):
     REGISTER_LIGHT = "register_light"
     REGISTER_BUTTON = "register_button"
     REGISTER_BUTTON_LOCK = "register_button_lock"
+    REGISTER_MEDIA_PLAYER = "register_media_player"
+    MEDIA_PLAYER_STATE = "media_player_state"
+
+
+class ExternalPlayerEvent(str, Enum):
+    """Instructions LVA sends to the registered external media player.
+
+    Sent as event frames, but only to the connection that registered the
+    player (client mode: the single peer). The player reports outcomes back
+    with media_player_state / volume_changed commands.
+    """
+
+    PLAY = "media_player_play"
+    PAUSE = "media_player_pause"
+    RESUME = "media_player_resume"
+    STOP = "media_player_stop"
+    SET_VOLUME = "media_player_set_volume"
 
 
 # ---------------------------------------------------------------------------
@@ -222,18 +292,13 @@ class PeripheralAPIBridge:
     4. Call ``emit_event_sync()`` from any thread (mpv callbacks, audio thread).
     """
 
-    DEFAULT_VOLUME_STEP: float = 0.05
     LATE_ENTITY_RECONNECT_DEBOUNCE_S: float = 1.5
     LATE_ENTITY_RECONNECT_COOLDOWN_S: float = 60.0
 
-    def __init__(
-        self,
-        volume_step: float = DEFAULT_VOLUME_STEP,
-    ) -> None:
-        self._volume_step = volume_step
-
+    def __init__(self) -> None:
         self._state: Optional[ServerState] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._external_player_ws: Optional[Any] = None
 
         # Last conversation exchange — sent in the snapshot to newly-connecting clients
         self._last_stt_text: Optional[str] = None
@@ -287,6 +352,7 @@ class PeripheralAPIBridge:
                         "volume_muted": state.volume == 0.0,
                         "ha_connected": state.connected,
                         "button_controls_locked": state.button_controls_locked,
+                        "external_media_player": state.external_media_player,
                         "last_stt_text": self._last_stt_text,
                         "last_tts_text": self._last_tts_text,
                     },
@@ -336,7 +402,7 @@ class PeripheralAPIBridge:
     # Command dispatch
     # ------------------------------------------------------------------
 
-    async def _dispatch_command(self, raw: str) -> None:
+    async def _dispatch_command(self, raw: str, websocket: Any = None) -> None:
         """Parse and execute a JSON command from the peripheral container."""
         try:
             msg: Dict[str, Any] = json.loads(raw)
@@ -377,35 +443,27 @@ class PeripheralAPIBridge:
                 satellite._set_muted(False)  # pylint: disable=protected-access
                 await self._push_mute_switch(satellite, muted=False)
 
-        elif command in (LVACommand.VOLUME_UP, LVACommand.VOLUME_DOWN):
-            delta = self._volume_step if command == LVACommand.VOLUME_UP else -self._volume_step
-            new_vol = max(0.0, min(1.0, state.volume + delta))
-            vol_pct = int(round(new_vol * 100))
+        elif command == LVACommand.VOLUME_CHANGED:
+            # Report that the REAL volume changed on the peripheral side
+            # (e.g. the speaker's own hardware volume buttons). Loop break:
+            # LVA only syncs bookkeeping — it does NOT re-apply the volume
+            # to the music player (the physical change already happened) and
+            # does NOT re-emit volume_changed to peripherals (persist_volume
+            # is called with emit_event=False).
+            data = msg.get("data", {})
+            volume = data.get("volume")
+            if not isinstance(volume, (int, float)):
+                _LOGGER.warning("Peripheral: invalid volume in volume_changed report: %s", volume)
+                return
 
-            # TTS volume is intentionally untouched: the assistant's voice
-            # stays at its own fixed level, decoupled from the player volume.
-            state.music_player.set_volume(vol_pct)
+            new_vol = max(0.0, min(1.0, float(volume)))
+            if abs(state.volume - new_vol) < 0.0001:
+                # Already in sync; pushing/persisting again would only echo.
+                return
 
-            if state.media_player_entity is not None:
-                state.media_player_entity.volume = new_vol
-                state.media_player_entity.previous_volume = new_vol
+            self._push_media_volume(state, satellite, new_vol)
 
-                # Push the new volume to HA so its media player entity updates in real time
-                if satellite is not None:
-
-                    satellite.send_messages(
-                        [
-                            MediaPlayerStateResponse(
-                                key=state.media_player_entity.key,
-                                state=state.media_player_entity.state,
-                                volume=new_vol,
-                                muted=state.media_player_entity.muted,
-                            )
-                        ]
-                    )
-
-            # persist_volume also emits VOLUME_CHANGED via models.py
-            state.persist_volume(new_vol)
+            state.persist_volume(new_vol, emit_event=False)
 
         elif command == LVACommand.SET_VOLUME:
             data = msg.get("data", {})
@@ -415,32 +473,28 @@ class PeripheralAPIBridge:
                 return
 
             new_vol = max(0.0, min(1.0, float(volume)))
+
+            if self._external_player_requested():
+                if not self._external_player_is_sender(websocket):
+                    self.send_external_player_sync(ExternalPlayerEvent.SET_VOLUME, {"volume": new_vol})
+                return
+
             vol_pct = int(round(new_vol * 100))
 
             # TTS volume is intentionally untouched: the assistant's voice
             # stays at its own fixed level, decoupled from the player volume.
             state.music_player.set_volume(vol_pct)
 
-            if state.media_player_entity is not None:
-                state.media_player_entity.volume = new_vol
-                state.media_player_entity.previous_volume = new_vol
-
-                # Push the new volume to HA so its media player entity updates in real time
-                if satellite is not None:
-
-                    satellite.send_messages(
-                        [
-                            MediaPlayerStateResponse(
-                                key=state.media_player_entity.key,
-                                state=state.media_player_entity.state,
-                                volume=new_vol,
-                                muted=state.media_player_entity.muted,
-                            )
-                        ]
-                    )
+            self._push_media_volume(state, satellite, new_vol)
 
             # persist_volume also emits VOLUME_CHANGED via models.py
             state.persist_volume(new_vol)
+
+        elif command == LVACommand.REGISTER_MEDIA_PLAYER:
+            self._register_external_player(websocket)
+
+        elif command == LVACommand.MEDIA_PLAYER_STATE:
+            await self._handle_media_player_state(msg, satellite)
 
         elif command == LVACommand.STOP_TIMER_RINGING:
             if satellite is None:
@@ -453,6 +507,11 @@ class PeripheralAPIBridge:
                 await self.emit_event(LVAEvent.IDLE)
 
         elif command == LVACommand.STOP_MEDIA_PLAYER:
+            if self._external_player_requested():
+                if not self._external_player_is_sender(websocket):
+                    self.send_external_player_sync(ExternalPlayerEvent.STOP)
+                return
+
             state.music_player.stop()
             if state.media_player_entity is not None:
 
@@ -461,6 +520,11 @@ class PeripheralAPIBridge:
                     satellite.send_messages([self._create_media_player_response(MediaPlayerState.IDLE)])
 
         elif command == LVACommand.PAUSE_MEDIA_PLAYER:
+            if self._external_player_requested():
+                if not self._external_player_is_sender(websocket):
+                    self.send_external_player_sync(ExternalPlayerEvent.PAUSE)
+                return
+
             state.music_player.pause()
             if state.media_player_entity is not None:
 
@@ -469,6 +533,11 @@ class PeripheralAPIBridge:
                     satellite.send_messages([self._create_media_player_response(MediaPlayerState.PAUSED)])
 
         elif command == LVACommand.RESUME_MEDIA_PLAYER:
+            if self._external_player_requested():
+                if not self._external_player_is_sender(websocket):
+                    self.send_external_player_sync(ExternalPlayerEvent.RESUME)
+                return
+
             state.music_player.resume()
             if state.media_player_entity is not None:
 
@@ -668,6 +737,160 @@ class PeripheralAPIBridge:
 
         self._pending_entity_reconnect_task = self._loop.create_task(_trigger())
 
+    # ------------------------------------------------------------------
+    # External media player
+    # ------------------------------------------------------------------
+
+    def _external_player_target(self) -> Optional[Any]:
+        """Connection of the registered external player, if reachable.
+
+        Server mode: the connection that sent register_media_player.
+        Client mode: the single peer owns the player.
+        """
+        if self._external_player_ws is not None:
+            return self._external_player_ws
+        return getattr(self, "_ws", None)  # client mode: the single peer owns the player
+
+    def _external_player_requested(self) -> bool:
+        """True when an external player owns playback for this request.
+
+        External mode bypasses the local music player entirely: transport
+        and volume requests are forwarded to the player as instructions.
+        """
+        state = self._state
+        return bool(state is not None and state.external_media_player)
+
+    def _external_player_is_sender(self, websocket: Any) -> bool:
+        """True when the request came from the external player itself.
+
+        The player owns its state — requests it originated are NOT echoed
+        back to it; it reports the outcome via media_player_state /
+        volume_changed (loop break).
+        """
+        if websocket is None:
+            return False
+        return websocket is self._external_player_target()
+
+    def _register_external_player(self, websocket: Any) -> None:
+        """Mark the requesting connection as the external media player."""
+        state = self._state
+        if state is None:
+            return
+        state.external_media_player = True
+        self._external_player_ws = websocket
+        _LOGGER.info("External media player registered%s", " by peripheral" if websocket is not None else "")
+
+    def unregister_external_player(self, websocket: Any = None) -> None:
+        """Drop the external-player registration (owning connection lost).
+
+        Falls back to driving the local music player. A disconnect of a
+        DIFFERENT peripheral keeps the registration intact.
+        """
+        state = self._state
+        if state is None or not state.external_media_player:
+            return
+        if websocket is not None and self._external_player_ws is not None and self._external_player_ws is not websocket:
+            return
+        state.external_media_player = False
+        self._external_player_ws = None
+        _LOGGER.warning("External media player unregistered — falling back to the local player")
+
+    async def _handle_media_player_state(self, msg: Dict[str, Any], satellite: Any) -> None:
+        """Callback from the external player: source of truth for HA state."""
+        state = self._state
+        if state is None:
+            return
+
+        data = msg.get("data", {})
+        reported = data.get("state")
+        mapping = {
+            "playing": MediaPlayerState.PLAYING,
+            "paused": MediaPlayerState.PAUSED,
+            "idle": MediaPlayerState.IDLE,
+        }
+        new_state = mapping.get(reported)
+        if new_state is None:
+            _LOGGER.warning("Peripheral: invalid state in media_player_state report: %s", reported)
+            return
+
+        if state.media_player_entity is not None:
+            state.media_player_entity.state = new_state
+            if satellite is not None:
+                satellite.send_messages([self._create_media_player_response(new_state)])
+
+        # Inform the other peripherals (external mode only — local mode
+        # emits nothing on state changes, as upstream LVA).
+        if new_state == MediaPlayerState.PLAYING:
+            await self.emit_event(LVAEvent.MEDIA_PLAYER_PLAYING)
+        elif new_state == MediaPlayerState.PAUSED:
+            await self.emit_event(LVAEvent.MEDIA_PLAYER_PAUSED)
+
+    def send_external_player_sync(
+        self,
+        event: ExternalPlayerEvent,
+        data: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Fire-and-forget instruction to the registered external player.
+
+        Thread-safe; safe to call from sync HA entity handlers and from
+        the event loop alike.
+        """
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            _LOGGER.debug("External player instruction %s dropped (no loop)", event.value)
+            return
+        asyncio.run_coroutine_threadsafe(self._send_to_external_player(event, data), loop)
+
+    async def _send_to_external_player(
+        self,
+        event: ExternalPlayerEvent,
+        data: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        state = self._state
+        if state is None or not state.external_media_player:
+            _LOGGER.debug("External player instruction %s dropped (not registered)", event.value)
+            return
+
+        ws = self._external_player_target()
+        if ws is None:
+            _LOGGER.debug("External player instruction %s dropped (not connected)", event.value)
+            return
+
+        payload: Dict[str, Any] = {"event": event.value}
+        if data:
+            payload["data"] = data
+        try:
+            await ws.send(json.dumps(payload))
+            _LOGGER.debug("External player instruction %s sent", event.value)
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.debug("External player instruction %s failed to send", event.value)
+
+    def _push_media_volume(self, state: "ServerState", satellite: Any, volume: float) -> None:
+        """Update the HA media player entity volume and push the state to HA.
+
+        Bookkeeping only — the caller decides whether the music player
+        volume itself is written (HA-initiated changes, peripheral
+        set_volume) or left alone (peripheral volume_changed reports).
+        """
+        if state.media_player_entity is None:
+            return
+
+        state.media_player_entity.volume = volume
+        state.media_player_entity.previous_volume = volume
+
+        # Push the new volume to HA so its media player entity updates in real time
+        if satellite is not None:
+            satellite.send_messages(
+                [
+                    MediaPlayerStateResponse(
+                        key=state.media_player_entity.key,
+                        state=state.media_player_entity.state,
+                        volume=volume,
+                        muted=state.media_player_entity.muted,
+                    )
+                ]
+            )
+
     async def _push_mute_switch(self, satellite: Any, *, muted: bool) -> None:
         """Reflect a peripheral-triggered mute change to Home Assistant."""
         state = self._state
@@ -719,6 +942,7 @@ class PeripheralAPIBridge:
             LVAEvent.TIMER_TICKING,
             LVAEvent.TIMER_RINGING,
             LVAEvent.MEDIA_PLAYER_PLAYING,
+            LVAEvent.MEDIA_PLAYER_PAUSED,
             LVAEvent.DISCONNECTED,
             LVAEvent.PIPELINE_ERROR,
             LVAEvent.VOLUME_MUTED,
@@ -783,9 +1007,8 @@ class PeripheralAPIServer(PeripheralAPIBridge):
         self,
         host: str = "0.0.0.0",
         port: int = 6055,
-        volume_step: float = PeripheralAPIBridge.DEFAULT_VOLUME_STEP,
     ) -> None:
-        super().__init__(volume_step=volume_step)
+        super().__init__()
         self._host = host
         self._port = port
         self._clients: Set[Any] = set()
@@ -845,10 +1068,11 @@ class PeripheralAPIServer(PeripheralAPIBridge):
 
         try:
             async for raw in websocket:
-                await self._dispatch_command(raw)
+                await self._dispatch_command(raw, websocket)
         except Exception as exc:  # pylint: disable=broad-except
             _LOGGER.debug("Peripheral client %s error: %s", addr, exc)
         finally:
+            self.unregister_external_player(websocket)
             self._clients.discard(websocket)
             _LOGGER.info("Peripheral client disconnected: %s", addr)
 
@@ -875,9 +1099,8 @@ class PeripheralAPIClient(PeripheralAPIBridge):
     def __init__(
         self,
         url: str,
-        volume_step: float = PeripheralAPIBridge.DEFAULT_VOLUME_STEP,
     ) -> None:
-        super().__init__(volume_step=volume_step)
+        super().__init__()
         self._url = url
         self._ws: Optional[Any] = None
         self._task: Optional[asyncio.Task] = None
@@ -927,10 +1150,11 @@ class PeripheralAPIClient(PeripheralAPIBridge):
                     _LOGGER.info("Peripheral API connected to %s", self._url)
                     await self._send_snapshot(websocket)
                     async for raw in websocket:
-                        await self._dispatch_command(raw)
+                        await self._dispatch_command(raw, websocket)
             except Exception as exc:  # pylint: disable=broad-except
                 _LOGGER.warning("Peripheral API connection to %s lost: %s", self._url, exc)
             finally:
+                self.unregister_external_player(self._ws)
                 self._ws = None
 
             await asyncio.sleep(delay)

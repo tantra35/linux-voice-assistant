@@ -6,8 +6,14 @@ from typing import Any, Dict, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aioesphomeapi.model import MediaPlayerState
 
-from linux_voice_assistant.peripheral_api import LVACommand, LVAEvent, PeripheralAPIServer
+from linux_voice_assistant.peripheral_api import (
+    ExternalPlayerEvent,
+    LVACommand,
+    LVAEvent,
+    PeripheralAPIServer,
+)
 from tests.unit.conftest import make_state
 
 # ---------------------------------------------------------------------------
@@ -32,11 +38,26 @@ def make_media_entity(key: int = 1, volume: float = 0.5, muted: bool = False):
     return entity
 
 
-async def dispatch(server: PeripheralAPIServer, command: str, data: Optional[dict] = None) -> None:
+async def dispatch(
+    server: PeripheralAPIServer,
+    command: str,
+    data: Optional[dict] = None,
+    websocket: Any = None,
+) -> None:
     payload: Dict[str, Any] = {"command": command}
     if data is not None:
         payload["data"] = data
-    await server._dispatch_command(json.dumps(payload))  # pylint: disable=protected-access
+    await server._dispatch_command(json.dumps(payload), websocket)  # pylint: disable=protected-access
+
+
+class FakePeer:
+    """Minimal fake WebSocket peer that records sent frames."""
+
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, raw):
+        self.sent.append(json.loads(raw))
 
 
 # ---------------------------------------------------------------------------
@@ -54,14 +75,6 @@ class TestInit:
         server = PeripheralAPIServer(host="127.0.0.1", port=9999)
         assert server._host == "127.0.0.1"
         assert server._port == 9999
-
-    def test_default_volume_step(self):
-        server = PeripheralAPIServer()
-        assert server._volume_step == PeripheralAPIServer.DEFAULT_VOLUME_STEP
-
-    def test_custom_volume_step(self):
-        server = PeripheralAPIServer(volume_step=0.1)
-        assert server._volume_step == pytest.approx(0.1)
 
     def test_no_clients_on_init(self):
         server = PeripheralAPIServer()
@@ -391,66 +404,83 @@ class TestDispatchMute:
 # ---------------------------------------------------------------------------
 
 
-class TestDispatchVolume:
+class TestDispatchVolumeChanged:
     @pytest.mark.asyncio
-    async def test_volume_up_increases_volume(self, tmp_path):
+    async def test_reported_volume_is_stored(self, tmp_path):
         state = make_state(tmp_path, volume=0.5)
         server = make_server(state)
 
-        await dispatch(server, LVACommand.VOLUME_UP.value)
+        await dispatch(server, LVACommand.VOLUME_CHANGED.value, {"volume": 0.7})
 
-        assert state.volume == pytest.approx(0.5 + PeripheralAPIServer.DEFAULT_VOLUME_STEP)
+        assert state.volume == pytest.approx(0.7)
 
     @pytest.mark.asyncio
-    async def test_volume_down_decreases_volume(self, tmp_path):
+    async def test_reported_volume_clamped(self, tmp_path):
         state = make_state(tmp_path, volume=0.5)
         server = make_server(state)
 
-        await dispatch(server, LVACommand.VOLUME_DOWN.value)
-
-        assert state.volume == pytest.approx(0.5 - PeripheralAPIServer.DEFAULT_VOLUME_STEP)
-
-    @pytest.mark.asyncio
-    async def test_volume_up_clamped_at_one(self, tmp_path):
-        state = make_state(tmp_path, volume=1.0)
-        server = make_server(state)
-
-        await dispatch(server, LVACommand.VOLUME_UP.value)
+        await dispatch(server, LVACommand.VOLUME_CHANGED.value, {"volume": 7.5})
 
         assert state.volume == pytest.approx(1.0)
 
     @pytest.mark.asyncio
-    async def test_volume_down_clamped_at_zero(self, tmp_path):
-        state = make_state(tmp_path, volume=0.0)
-        server = make_server(state)
-
-        await dispatch(server, LVACommand.VOLUME_DOWN.value)
-
-        assert state.volume == pytest.approx(0.0)
-
-    @pytest.mark.asyncio
-    async def test_volume_up_updates_music_player_only(self, tmp_path):
+    async def test_reported_volume_does_not_touch_players(self, tmp_path):
         state = make_state(tmp_path, volume=0.5)
         server = make_server(state)
 
-        await dispatch(server, LVACommand.VOLUME_UP.value)
+        await dispatch(server, LVACommand.VOLUME_CHANGED.value, {"volume": 0.7})
 
-        state.music_player.set_volume.assert_called_once()
-        # TTS volume is decoupled from the player volume
+        # The physical change already happened on the peripheral side
+        state.music_player.set_volume.assert_not_called()
         state.tts_player.set_volume.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_volume_up_pushes_media_player_state(self, tmp_path):
+    async def test_reported_volume_is_not_echoed_back(self, tmp_path):
+        state = make_state(tmp_path, volume=0.5)
+        state.peripheral_api = MagicMock()
+        server = make_server(state)
+
+        await dispatch(server, LVACommand.VOLUME_CHANGED.value, {"volume": 0.7})
+
+        state.peripheral_api.emit_event_sync.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reported_volume_pushes_media_player_state(self, tmp_path):
         state = make_state(tmp_path, volume=0.5)
         state.media_player_entity = make_media_entity()
         satellite = MagicMock()
         state.satellite = satellite
         server = make_server(state)
 
-        await dispatch(server, LVACommand.VOLUME_UP.value)
+        await dispatch(server, LVACommand.VOLUME_CHANGED.value, {"volume": 0.7})
 
         satellite.send_messages.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_same_volume_report_is_ignored(self, tmp_path):
+        state = make_state(tmp_path, volume=0.5)
+        state.media_player_entity = make_media_entity(volume=0.5)
+        satellite = MagicMock()
+        state.satellite = satellite
+        state.peripheral_api = MagicMock()
+        server = make_server(state)
+
+        await dispatch(server, LVACommand.VOLUME_CHANGED.value, {"volume": 0.5})
+
+        satellite.send_messages.assert_not_called()
+        state.peripheral_api.emit_event_sync.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_report_ignores_non_numeric(self, tmp_path):
+        state = make_state(tmp_path, volume=0.5)
+        server = make_server(state)
+
+        await dispatch(server, LVACommand.VOLUME_CHANGED.value, {"volume": "loud"})
+
+        assert state.volume == pytest.approx(0.5)
+
+
+class TestDispatchSetVolume:
     @pytest.mark.asyncio
     async def test_set_volume_sets_exact_value(self, tmp_path):
         state = make_state(tmp_path, volume=0.2)
@@ -495,6 +525,260 @@ class TestDispatchVolume:
         await dispatch(server, LVACommand.SET_VOLUME.value, {"volume": 1})
 
         assert state.volume == pytest.approx(1.0)
+
+
+class TestDispatchMediaPlayerEvents:
+    """Local mode: pause/resume/stop emit NO peripheral events (upstream behavior)."""
+
+    @pytest.mark.asyncio
+    async def test_pause_media_player_emits_no_event(self, tmp_path, monkeypatch):
+        state = make_state(tmp_path)
+        server = make_server(state)
+        sent = []
+
+        async def fake_send(raw_msg):
+            sent.append(json.loads(raw_msg))
+
+        monkeypatch.setattr(server, "_send_to_peers", fake_send)
+
+        await dispatch(server, LVACommand.PAUSE_MEDIA_PLAYER.value)
+
+        assert sent == []
+
+    @pytest.mark.asyncio
+    async def test_resume_media_player_emits_no_event(self, tmp_path, monkeypatch):
+        state = make_state(tmp_path)
+        server = make_server(state)
+        sent = []
+
+        async def fake_send(raw_msg):
+            sent.append(json.loads(raw_msg))
+
+        monkeypatch.setattr(server, "_send_to_peers", fake_send)
+
+        await dispatch(server, LVACommand.RESUME_MEDIA_PLAYER.value)
+
+        assert sent == []
+
+    @pytest.mark.asyncio
+    async def test_stop_media_player_emits_no_event(self, tmp_path, monkeypatch):
+        state = make_state(tmp_path)
+        server = make_server(state)
+        sent = []
+
+        async def fake_send(raw_msg):
+            sent.append(json.loads(raw_msg))
+
+        monkeypatch.setattr(server, "_send_to_peers", fake_send)
+
+        await dispatch(server, LVACommand.STOP_MEDIA_PLAYER.value)
+
+        assert sent == []
+
+
+class TestDispatchExternalPlayer:
+    def _make_external(self, tmp_path):
+        state = make_state(tmp_path)
+        server = make_server(state)
+        peer = FakePeer()
+        state.external_media_player = True
+        server._external_player_ws = peer  # pylint: disable=protected-access
+        return state, server, peer
+
+    @pytest.mark.asyncio
+    async def test_register_media_player_sets_flag(self, tmp_path):
+        state = make_state(tmp_path)
+        server = make_server(state)
+        peer = FakePeer()
+
+        await dispatch(server, LVACommand.REGISTER_MEDIA_PLAYER.value, websocket=peer)
+
+        assert state.external_media_player is True
+        assert server._external_player_ws is peer  # pylint: disable=protected-access
+
+    @pytest.mark.asyncio
+    async def test_register_media_player_is_idempotent(self, tmp_path):
+        state = make_state(tmp_path)
+        server = make_server(state)
+        first = FakePeer()
+        second = FakePeer()
+
+        await dispatch(server, LVACommand.REGISTER_MEDIA_PLAYER.value, websocket=first)
+        await dispatch(server, LVACommand.REGISTER_MEDIA_PLAYER.value, websocket=second)
+
+        assert state.external_media_player is True
+        assert server._external_player_ws is second  # pylint: disable=protected-access
+
+    @pytest.mark.asyncio
+    async def test_owner_disconnect_unregisters(self, tmp_path):
+        state, server, peer = self._make_external(tmp_path)
+
+        server.unregister_external_player(peer)  # pylint: disable=protected-access
+
+        assert state.external_media_player is False
+        assert server._external_player_ws is None  # pylint: disable=protected-access
+
+    @pytest.mark.asyncio
+    async def test_other_peer_disconnect_keeps_registration(self, tmp_path):
+        state, server, _ = self._make_external(tmp_path)
+
+        server.unregister_external_player(FakePeer())  # pylint: disable=protected-access
+
+        assert state.external_media_player is True
+
+    @pytest.mark.asyncio
+    async def test_media_player_state_playing_updates_entity_and_ha(self, tmp_path, monkeypatch):
+        state = make_state(tmp_path)
+        state.media_player_entity = make_media_entity()
+        satellite = MagicMock()
+        state.satellite = satellite
+        server = make_server(state)
+        sent = []
+
+        async def fake_send(raw_msg):
+            sent.append(json.loads(raw_msg))
+
+        monkeypatch.setattr(server, "_send_to_peers", fake_send)
+
+        await dispatch(server, LVACommand.MEDIA_PLAYER_STATE.value, {"state": "playing"})
+
+        assert state.media_player_entity.state == MediaPlayerState.PLAYING
+        satellite.send_messages.assert_called_once()
+        assert sent == [{"event": "media_player_playing"}]
+        assert server._current_state == LVAEvent.MEDIA_PLAYER_PLAYING  # pylint: disable=protected-access
+
+    @pytest.mark.asyncio
+    async def test_media_player_state_paused_emits_event(self, tmp_path, monkeypatch):
+        state = make_state(tmp_path)
+        state.media_player_entity = make_media_entity()
+        satellite = MagicMock()
+        state.satellite = satellite
+        server = make_server(state)
+        sent = []
+
+        async def fake_send(raw_msg):
+            sent.append(json.loads(raw_msg))
+
+        monkeypatch.setattr(server, "_send_to_peers", fake_send)
+
+        await dispatch(server, LVACommand.MEDIA_PLAYER_STATE.value, {"state": "paused"})
+
+        assert state.media_player_entity.state == MediaPlayerState.PAUSED
+        assert sent == [{"event": "media_player_paused"}]
+        assert server._current_state == LVAEvent.MEDIA_PLAYER_PAUSED  # pylint: disable=protected-access
+
+    @pytest.mark.asyncio
+    async def test_media_player_state_idle_updates_entity_without_event(self, tmp_path, monkeypatch):
+        state = make_state(tmp_path)
+        state.media_player_entity = make_media_entity()
+        satellite = MagicMock()
+        state.satellite = satellite
+        server = make_server(state)
+        sent = []
+
+        async def fake_send(raw_msg):
+            sent.append(json.loads(raw_msg))
+
+        monkeypatch.setattr(server, "_send_to_peers", fake_send)
+
+        await dispatch(server, LVACommand.MEDIA_PLAYER_STATE.value, {"state": "idle"})
+
+        assert state.media_player_entity.state == MediaPlayerState.IDLE
+        satellite.send_messages.assert_called_once()
+        assert sent == []
+
+    @pytest.mark.asyncio
+    async def test_media_player_state_ignores_invalid(self, tmp_path, monkeypatch):
+        state = make_state(tmp_path)
+        state.media_player_entity = make_media_entity()
+        satellite = MagicMock()
+        state.satellite = satellite
+        server = make_server(state)
+        sent = []
+
+        async def fake_send(raw_msg):
+            sent.append(json.loads(raw_msg))
+
+        monkeypatch.setattr(server, "_send_to_peers", fake_send)
+
+        await dispatch(server, LVACommand.MEDIA_PLAYER_STATE.value, {"state": "rewinding"})
+
+        satellite.send_messages.assert_not_called()
+        assert sent == []
+
+    @pytest.mark.asyncio
+    async def test_pause_media_player_routes_instruction_to_player(self, tmp_path):
+        state, server, peer = self._make_external(tmp_path)
+        other = FakePeer()
+        server._loop = asyncio.get_running_loop()
+
+        await dispatch(server, LVACommand.PAUSE_MEDIA_PLAYER.value, websocket=other)
+        await asyncio.sleep(0.05)
+
+        assert peer.sent == [{"event": "media_player_pause"}]
+        state.music_player.pause.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_player_originated_pause_is_not_echoed(self, tmp_path):
+        state, server, peer = self._make_external(tmp_path)
+        server._loop = asyncio.get_running_loop()
+
+        await dispatch(server, LVACommand.PAUSE_MEDIA_PLAYER.value, websocket=peer)
+        await asyncio.sleep(0.05)
+
+        assert peer.sent == []
+        state.music_player.pause.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_resume_media_player_routes_instruction_to_player(self, tmp_path):
+        state, server, peer = self._make_external(tmp_path)
+        other = FakePeer()
+        server._loop = asyncio.get_running_loop()
+
+        await dispatch(server, LVACommand.RESUME_MEDIA_PLAYER.value, websocket=other)
+        await asyncio.sleep(0.05)
+
+        assert peer.sent == [{"event": "media_player_resume"}]
+        state.music_player.resume.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_stop_media_player_routes_instruction_to_player(self, tmp_path):
+        state, server, peer = self._make_external(tmp_path)
+        other = FakePeer()
+        server._loop = asyncio.get_running_loop()
+
+        await dispatch(server, LVACommand.STOP_MEDIA_PLAYER.value, websocket=other)
+        await asyncio.sleep(0.05)
+
+        assert peer.sent == [{"event": "media_player_stop"}]
+        state.music_player.stop.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_set_volume_routes_instruction_in_external_mode(self, tmp_path):
+        state, server, peer = self._make_external(tmp_path)
+        other = FakePeer()
+        server._loop = asyncio.get_running_loop()
+
+        await dispatch(server, LVACommand.SET_VOLUME.value, {"volume": 0.4}, websocket=other)
+        await asyncio.sleep(0.05)
+
+        assert peer.sent == [{"event": "media_player_set_volume", "data": {"volume": 0.4}}]
+        state.music_player.set_volume.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_local_mode_pause_still_drives_local_player(self, tmp_path):
+        state = make_state(tmp_path)
+        server = make_server(state)
+
+        await dispatch(server, LVACommand.PAUSE_MEDIA_PLAYER.value)
+
+        state.music_player.pause.assert_called_once()
+
+    def test_instruction_not_sent_without_loop(self, tmp_path):
+        state, server, peer = self._make_external(tmp_path)
+        # _loop is None in unit tests: send_external_player_sync must not crash
+        server.send_external_player_sync(ExternalPlayerEvent.PAUSE)  # pylint: disable=protected-access
+        assert peer.sent == []
 
 
 # ---------------------------------------------------------------------------

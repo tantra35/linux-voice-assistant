@@ -160,10 +160,6 @@ if [ -n "${PERIPHERAL_PORT}" ]; then
   EXTRA_ARGS+=( "--peripheral-port" "$PERIPHERAL_PORT" )
 fi
 
-if [ -n "${PERIPHERAL_VOLUME_STEP}" ]; then
-  EXTRA_ARGS+=( "--peripheral-volume-step" "$PERIPHERAL_VOLUME_STEP" )
-fi
-
 if [ -n "${PERIPHERAL_CONNECT}" ]; then
   EXTRA_ARGS+=( "--peripheral-connect" "$PERIPHERAL_CONNECT" )
 fi

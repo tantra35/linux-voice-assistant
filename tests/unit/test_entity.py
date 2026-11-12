@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from aioesphomeapi.api_pb2 import (  # type: ignore[attr-defined]
     ListEntitiesMediaPlayerResponse,
     ListEntitiesNumberResponse,
@@ -29,6 +31,8 @@ def make_server():
     """Minimal mock APIServer."""
     server = MagicMock()
     server.state = MagicMock()
+    # Explicit bool: a bare MagicMock attribute would truthy-enable external mode
+    server.state.external_media_player = False
     return server
 
 
@@ -199,6 +203,116 @@ class TestMediaPlayerEntityVolume:
         msg = MediaPlayerCommandRequest(key=99, has_volume=True, volume=0.6)
         msgs = list(entity.handle_message(msg))
         assert msgs == [] or not any(isinstance(m, MediaPlayerStateResponse) for m in msgs)
+
+
+class TestExternalMediaPlayerRouting:
+    """While an external player is registered, the local players are untouched."""
+
+    def _external_entity(self):
+        server = make_server()
+        server.state.external_media_player = True
+        entity = make_media_player(server=server)
+        # Construction pushes the initial volume to the external player; clear it per-test
+        server.state.peripheral_api.send_external_player_sync.reset_mock()
+        return entity
+
+    def test_play_routes_instruction_to_peripheral(self):
+        from linux_voice_assistant.peripheral_api import ExternalPlayerEvent
+
+        entity = self._external_entity()
+
+        list(entity.play("http://example.com/track.flac", announcement=False))
+
+        api = entity.server.state.peripheral_api
+        api.send_external_player_sync.assert_called_once_with(
+            ExternalPlayerEvent.PLAY,
+            {"media_url": "http://example.com/track.flac", "announcement": False},
+        )
+        entity.music_player.play.assert_not_called()
+        assert entity.state == MediaPlayerState.PLAYING
+
+    def test_pause_command_routes_instruction(self):
+        from linux_voice_assistant.peripheral_api import ExternalPlayerEvent
+
+        entity = self._external_entity()
+        msg = MediaPlayerCommandRequest(key=1, has_command=True, command=MediaPlayerCommand.PAUSE)
+
+        list(entity.handle_message(msg))
+
+        entity.server.state.peripheral_api.send_external_player_sync.assert_called_once_with(ExternalPlayerEvent.PAUSE, None)
+        entity.music_player.pause.assert_not_called()
+        assert entity.state == MediaPlayerState.PAUSED
+
+    def test_resume_command_routes_instruction(self):
+        from linux_voice_assistant.peripheral_api import ExternalPlayerEvent
+
+        entity = self._external_entity()
+        msg = MediaPlayerCommandRequest(key=1, has_command=True, command=MediaPlayerCommand.PLAY)
+
+        list(entity.handle_message(msg))
+
+        entity.server.state.peripheral_api.send_external_player_sync.assert_called_once_with(ExternalPlayerEvent.RESUME, None)
+        entity.music_player.resume.assert_not_called()
+
+    def test_stop_command_routes_instruction(self):
+        from linux_voice_assistant.peripheral_api import ExternalPlayerEvent
+
+        entity = self._external_entity()
+        msg = MediaPlayerCommandRequest(key=1, has_command=True, command=MediaPlayerCommand.STOP)
+
+        list(entity.handle_message(msg))
+
+        entity.server.state.peripheral_api.send_external_player_sync.assert_called_once_with(ExternalPlayerEvent.STOP, None)
+        entity.music_player.stop.assert_not_called()
+
+    def test_volume_command_routes_instruction(self):
+        from linux_voice_assistant.peripheral_api import ExternalPlayerEvent
+
+        entity = self._external_entity()
+        msg = MediaPlayerCommandRequest(key=1, has_volume=True, volume=0.6)
+
+        list(entity.handle_message(msg))
+
+        entity.server.state.peripheral_api.send_external_player_sync.assert_called_once_with(ExternalPlayerEvent.SET_VOLUME, {"volume": pytest.approx(0.6)})
+        entity.music_player.set_volume.assert_not_called()
+        assert abs(entity.volume - 0.6) < 1e-6
+
+    def test_mute_routes_instruction(self):
+        from linux_voice_assistant.peripheral_api import ExternalPlayerEvent
+
+        entity = self._external_entity()
+        entity.volume = 0.8
+        msg = MediaPlayerCommandRequest(key=1, has_command=True, command=MediaPlayerCommand.MUTE)
+
+        list(entity.handle_message(msg))
+
+        entity.server.state.peripheral_api.send_external_player_sync.assert_called_once_with(ExternalPlayerEvent.SET_VOLUME, {"volume": 0.0})
+        entity.music_player.set_volume.assert_not_called()
+        assert entity.muted is True
+
+    def test_unmute_routes_instruction(self):
+        from linux_voice_assistant.peripheral_api import ExternalPlayerEvent
+
+        entity = self._external_entity()
+        entity.volume = 0.0
+        entity.muted = True
+        entity.previous_volume = 0.8
+        msg = MediaPlayerCommandRequest(key=1, has_command=True, command=MediaPlayerCommand.UNMUTE)
+
+        list(entity.handle_message(msg))
+
+        entity.server.state.peripheral_api.send_external_player_sync.assert_called_once_with(ExternalPlayerEvent.SET_VOLUME, {"volume": 0.8})
+        entity.music_player.set_volume.assert_not_called()
+        assert entity.muted is False
+
+    def test_local_mode_still_drives_local_player(self):
+        entity = make_media_player()  # external_media_player = False
+        msg = MediaPlayerCommandRequest(key=1, has_command=True, command=MediaPlayerCommand.PAUSE)
+
+        list(entity.handle_message(msg))
+
+        entity.music_player.pause.assert_called_once()
+        entity.server.state.peripheral_api.send_external_player_sync.assert_not_called()
 
 
 class TestMediaPlayerEntityMuteUnmute:

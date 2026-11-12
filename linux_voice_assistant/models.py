@@ -217,6 +217,7 @@ class ServerState:
     refractory_seconds: float = 2.0
     thinking_sound_enabled: bool = False
     button_controls_locked: bool = False
+    external_media_player: bool = False
     output_only: bool = False
     muted: bool = False
     connected: bool = False
@@ -261,8 +262,13 @@ class ServerState:
                 indent=4,
             )
 
-    def persist_volume(self, volume: float) -> None:
-        """Persist the normalized media volume (0.0 - 1.0)."""
+    def persist_volume(self, volume: float, *, emit_event: bool = True) -> None:
+        """Persist the normalized media volume (0.0 - 1.0).
+
+        ``emit_event=False`` suppresses the VOLUME_CHANGED/VOLUME_MUTED
+        peripheral events — used when the peripheral itself reported the
+        change (the volume_changed command) so it is not echoed back.
+        """
         clamped_volume = max(0.0, min(1.0, volume))
         _LOGGER.debug(
             "persist_volume called: new=%s, current=%s, prefs=%s",
@@ -284,7 +290,7 @@ class ServerState:
 
         # Notify peripheral container (thread-safe; may be called from mpv callbacks)
         api = self.peripheral_api
-        if api is not None:
+        if api is not None and emit_event:
             from .peripheral_api import LVAEvent  # local import avoids circular dep
 
             api.emit_event_sync(LVAEvent.VOLUME_CHANGED, {"volume": round(clamped_volume, 3)})

@@ -243,6 +243,15 @@ class TestPersistVolume:
         state.peripheral_api.emit_event_sync.assert_any_call(LVAEvent.VOLUME_CHANGED, {"volume": 0.0})
         state.peripheral_api.emit_event_sync.assert_any_call(LVAEvent.VOLUME_MUTED, {"muted": True})
 
+    def test_persist_volume_emit_event_false_suppresses_events(self, tmp_path):
+        state = make_server_state(tmp_path, volume=0.5)
+        state.peripheral_api = Mock()
+
+        state.persist_volume(0.8, emit_event=False)
+
+        state.peripheral_api.emit_event_sync.assert_not_called()
+        assert state.volume == 0.8
+
 
 # ---------------------------------------------------------------------------
 # ServerState.persist_mic_gain()

@@ -205,7 +205,6 @@ Environment=PREFERENCES_FILE="/home/pi/linux-voice-assistant/preferences.json"
 # Environment=BUTTON_LONG_PRESS_SOUND="sounds/button_long_press.flac"
 # Environment=PERIPHERAL_HOST="0.0.0.0"
 # Environment=PERIPHERAL_PORT="6055"
-# Environment=PERIPHERAL_VOLUME_STEP="%(default)s"
 # Environment=PERIPHERAL_STARTUP_WAIT="2.0"
 # Environment=DISABLE_PERIPHERAL_API="1"
 # Environment=ENABLE_OUTPUT_ONLY="1"
@@ -308,7 +307,6 @@ The following variables can be configured in the `.env` or in the service file:
 | `BUTTON_LONG_PRESS_SOUND` | `sounds/button_long_press.flac` | Sound file for button long press |
 | `PERIPHERAL_HOST` | 0.0.0.0 | Host for the peripheral WebSocket API |
 | `PERIPHERAL_PORT` | 6055 | Port for the peripheral WebSocket API |
-| `PERIPHERAL_VOLUME_STEP` | %(default)s | Volume change per button press |
 | `PERIPHERAL_CONNECT` | — | Connect LVA as a WebSocket client to this peripheral endpoint (e.g. `ws://speaker:6055`) instead of running the peripheral WebSocket server |
 | `PERIPHERAL_STARTUP_WAIT` | `2.0` | Seconds to wait for peripherals to register entities before Home Assistant enumerates them (0 to skip) |
 | `DISABLE_PERIPHERAL_API` | false | Disable the peripheral WebSocket API |

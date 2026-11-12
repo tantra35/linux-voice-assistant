@@ -649,6 +649,37 @@ class TestDownloadExternalWakeWord:
 
 
 # ---------------------------------------------------------------------------
+# MediaPlayerCommandRequest → peripheral events
+# ---------------------------------------------------------------------------
+
+
+class TestMediaPlayerCommandEvents:
+    """Local mode: HA pause/play produce NO peripheral events (upstream behavior)."""
+
+    def test_pause_command_emits_no_peripheral_event(self, tmp_path):
+        from aioesphomeapi.api_pb2 import MediaPlayerCommandRequest
+        from aioesphomeapi.model import MediaPlayerCommand
+
+        sat = make_satellite(tmp_path)
+        sat.state.peripheral_api = MagicMock()
+
+        list(sat.handle_message(MediaPlayerCommandRequest(key=1, has_command=True, command=MediaPlayerCommand.PAUSE)))
+
+        sat.state.peripheral_api.emit_event_sync.assert_not_called()
+
+    def test_play_command_emits_no_peripheral_event(self, tmp_path):
+        from aioesphomeapi.api_pb2 import MediaPlayerCommandRequest
+        from aioesphomeapi.model import MediaPlayerCommand
+
+        sat = make_satellite(tmp_path)
+        sat.state.peripheral_api = MagicMock()
+
+        list(sat.handle_message(MediaPlayerCommandRequest(key=1, has_command=True, command=MediaPlayerCommand.PLAY)))
+
+        sat.state.peripheral_api.emit_event_sync.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # VoiceAssistantSetConfiguration
 # ---------------------------------------------------------------------------
 

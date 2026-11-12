@@ -28,7 +28,7 @@ Your peripheral script                   LVA
         │◄─── event: tts_finished ─────────│
         │◄─── event: idle ─────────────────│
         │                                  │
-        │──── command: volume_up ─────────►│   (user pressed a button)
+        │──── command: volume_changed ────►│   (user changed the speaker volume)
         │──── command: start_listening ───►│   (user pressed action button)
 ```
 
@@ -97,7 +97,7 @@ async def main():
 
             # Example: send a command in response to an event
             if event == "idle":
-                await ws.send(json.dumps({"command": "volume_up"}))
+                await ws.send(json.dumps({"command": "start_listening"}))
 
 asyncio.run(main())
 ```
@@ -143,8 +143,9 @@ These are all the events LVA emits. Your peripheral script receives them and rea
 
 | Event | Data | Description |
 |-------|------|-------------|
-| `media_player_playing` | — | HA started streaming music or media to the background music player (non-announcement). Show a "media playing" indicator. Not emitted for TTS or announcements — those use `tts_speaking`. |
-| `volume_changed` | `{"volume": float}` | The music volume changed (0.0–1.0). Update any volume display or indicator ring. |
+| `media_player_playing` | — | The background music player is playing. External-player mode: emitted from the player's `media_player_state` reports (including resumes). Local mode: emitted only when HA starts streaming new music/media (non-announcement); pause/resume emit nothing, as in upstream LVA. Not emitted for TTS or announcements — those use `tts_speaking`. |
+| `media_player_paused` | — | The background music player was paused. External-player mode only: emitted from the player's `media_player_state` reports (local mode emits nothing, as upstream). Show a paused indicator. State event: replayed in the snapshot. |
+| `volume_changed` | `{"volume": float}` | The music volume changed (0.0–1.0). Update any volume display or indicator ring. Emitted only for LVA-side changes (HA slider, `set_volume`); changes the peripheral itself reported via the `volume_changed` command are NOT re-emitted (feedback-loop break). |
 | `volume_muted` | `{"muted": bool}` | The media player mute state changed. Distinct from microphone mute (`muted` event). |
 | `duck_changed` | `{"ducked": bool}` | The music player was ducked (assistant talking) or restored. A peripheral that plays its own audio should lower (and later restore) its playback volume — the mpv duck factor alone has little effect when the player runs on another host. Replayed in the snapshot so reconnecting clients learn the current duck state. |
 
@@ -192,9 +193,8 @@ For HA to see your entity, your peripheral must register before HA enumerates th
 
 | Command | Data | Description |
 |---------|------|-------------|
-| `volume_up` | — | Increase speaker volume by one step (default 5 %, configurable with `--peripheral-volume-step`). Updates HA, persists the value, and emits `volume_changed`. |
-| `volume_down` | — | Decrease speaker volume by one step. |
-| `set_volume` | `{"volume": float}` | Set the speaker volume to an exact value between 0.0 and 1.0. Values outside this range are clamped. Updates HA, persists, and emits `volume_changed`. Example: `{"command": "set_volume", "data": {"volume": 0.6}}` |
+| `volume_changed` | `{"volume": float}` | Report that the REAL volume changed on the peripheral side (e.g. the speaker's own hardware volume buttons). LVA clamps the value to 0.0–1.0, updates the HA media player entity and persists it, but does NOT touch the music player and does NOT re-emit `volume_changed` to peripherals (feedback-loop break). A report equal to the current volume is ignored. Example: `{"command": "volume_changed", "data": {"volume": 0.6}}` |
+| `set_volume` | `{"volume": float}` | Set the LVA-side player volume to an exact value between 0.0 and 1.0. Values outside this range are clamped. Unlike `volume_changed` this IS applied to the music player and emits `volume_changed`. Example: `{"command": "set_volume", "data": {"volume": 0.6}}` |
 
 ### Timer
 
@@ -208,7 +208,28 @@ For HA to see your entity, your peripheral must register before HA enumerates th
 |---------|------|-------------|
 | `stop_media_player` | — | Stop background music / media playback. Updates the HA media player entity state to Idle. |
 | `pause_media_player` | — | Pause background music. Updates HA state to Paused. |
-| `resume_media_player` | — | Resume paused music. Updates HA state to Playing. |
+| `resume_media_player` | — | Resume paused music. Updates HA state to Playing. In external-player mode this (and pause/stop) is routed to the registered external player instead of the local player. |
+
+### External media player
+
+A peripheral can take over playback entirely by registering as the **external
+media player**. While registered, LVA does not drive its local mpv player:
+HA play/pause/resume/stop/volume requests are forwarded to the registering
+connection as **instruction events** (LVA → peripheral), and the player
+reports the real outcome back with commands. The snapshot carries the flag as
+`"external_media_player": true/false`.
+
+| Message | Direction | Data | Description |
+|---------|-----------|------|-------------|
+| `register_media_player` | command (peripheral → LVA) | — | Register this connection as the external media player. Idempotent; dropped automatically when the connection falls. |
+| `media_player_play` | event (LVA → player) | `{"media_url": str\|list, "announcement": bool}` | Play the URL. With `announcement: true` treat it as an announcement over the current playback (pause/restore at the player's discretion). |
+| `media_player_pause` / `media_player_resume` / `media_player_stop` | event (LVA → player) | — | Transport control from HA, or routed `pause_media_player`-style requests from other peripherals. Requests the player originated itself are NOT echoed back to it. |
+| `media_player_set_volume` | event (LVA → player) | `{"volume": float}` | HA slider / mute (0.0). The player applies the real volume and reports back with `volume_changed`. |
+| `media_player_state` | command (player → LVA) | `{"state": "playing"\|"paused"\|"idle"}` | **Callback — the source of truth.** The player MUST send it whenever its state changes on its own (hardware buttons, end of track). LVA updates the HA entity and emits `media_player_playing` / `media_player_paused` to the other peripherals. |
+
+Loop safety: instructions and reports use separate names
+(`media_player_pause` vs `media_player_state`, `media_player_set_volume` vs
+`volume_changed`), and player-originated requests are never echoed back.
 
 ### Button events (sent to Home Assistant)
 

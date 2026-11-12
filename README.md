@@ -118,7 +118,6 @@ usage: __main__.py [-h] [--name NAME] [--audio-input-device AUDIO_INPUT_DEVICE] 
 | `--listen-during-wake-sound`    | Start listening while the wake sound is still playing                                  | False                                |
 | `--peripheral-host`             | Bind address for the peripheral WebSocket API                                          | 0.0.0.0                              |
 | `--peripheral-port`             | Port for the peripheral WebSocket API                                                  | 6055                                 |
-| `--peripheral-volume-step`      | Volume change per button press, 0.0–1.0                                                | %(default)s                          |
 | `--peripheral-startup-wait`     | Seconds to wait for peripherals to register entities                                   | 2.0                                  |
 | `--disable-peripheral-api`      | Disable the peripheral WebSocket API entirely                                          | False                                |
 | `--debug`                       | Print DEBUG messages to console                                                        | False                                |
