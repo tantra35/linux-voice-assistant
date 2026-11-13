@@ -37,6 +37,12 @@ class LibMpvPlayer(AudioPlayer):
         self._mpv = mpv.MPV(
             audio_display=False,
             video=False,
+            # ytdl_hook (embedded in libmpv) runs youtube-dl/yt-dlp on every
+            # http(s) URL. The binary is not shipped in the image (and is
+            # pointless for direct media URLs), so the hook only produces a
+            # misleading "youtube-dl failed" error for each playback. Direct
+            # URLs load natively either way - disable the hook entirely.
+            ytdl=False,
             log_handler=self._on_mpv_log,
             loglevel="error",
             cache="yes",
